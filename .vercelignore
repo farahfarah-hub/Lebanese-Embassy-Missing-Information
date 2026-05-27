@@ -1,0 +1,11 @@
+# Things that should ship to the public deployment are: index.html and vercel.json.
+# Everything below is build-time / source material that the static site doesn't need.
+
+exported_html/
+exported_html.zip
+build_portal.py
+.venv/
+__pycache__/
+*.pyc
+README.md
+.gitignore

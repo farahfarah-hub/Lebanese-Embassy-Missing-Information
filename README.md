@@ -11,10 +11,12 @@ currently missing or placeholder.
 
 | File | Purpose |
 | --- | --- |
-| `embassy_review_portal.html` | **The deliverable.** Self-contained, ~410 KB. Open in any modern browser. No server, no internet, no build step required. |
+| `index.html` | **The deliverable.** Self-contained, ~410 KB. Open in any modern browser. No server, no internet, no build step required. Also what Vercel serves at the deployment root. |
 | `build_portal.py` | Transformer that converts the original Notion export into the interactive portal. Re-run it after re-exporting from Notion. |
 | `exported_html.zip` | Original Notion export (the source of truth). |
 | `exported_html/` | Unzipped Notion export. The transformer reads from here. |
+| `vercel.json` | Vercel static-deploy config (clean URLs, cache + security headers). |
+| `.vercelignore` | Keeps build-time material (Python script, raw Notion export) out of the public deployment. |
 
 ## What the portal does
 
@@ -58,8 +60,16 @@ UI niceties:
 python3 -m venv .venv
 .venv/bin/pip install beautifulsoup4 lxml
 .venv/bin/python build_portal.py
-# → writes embassy_review_portal.html
+# → writes index.html
 ```
+
+## Deploying
+
+The repo is a zero-config static site. Connect it to **Vercel** (or Netlify,
+Cloudflare Pages, GitHub Pages) and the deploy will serve `index.html` at `/`.
+`vercel.json` enables clean URLs, no trailing slash, and sets sensible cache /
+security headers. `.vercelignore` keeps the Python build script and raw Notion
+export out of the public deployment so only `index.html` ships.
 
 The transformer is idempotent: re-run it any time the Notion source is
 re-exported and the portal regenerates from scratch.

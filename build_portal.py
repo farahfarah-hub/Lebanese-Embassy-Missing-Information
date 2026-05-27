@@ -30,7 +30,7 @@ SRC = Path(
     "Embassy Confirmation Document WhatsApp Chatbot Kno "
     "08e1eab5b9e14435b1392c00701cb6e3.html"
 )
-DST = Path("embassy_review_portal.html")
+DST = Path("index.html")
 
 # Header text -> column type. Matched case-insensitively, stripped.
 EDITABLE_COLUMN_TYPES: dict[str, str] = {
