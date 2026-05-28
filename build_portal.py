@@ -1262,8 +1262,11 @@ PORTAL_JS = r"""
     //
     // IMPORTANT: the Webhook node in n8n must have **HTTP Method = POST**
     // (it defaults to GET). It also needs "Binary Data" enabled so the
-    // uploaded file is exposed as binary property `html` for the email
-    // node to attach.
+    // uploaded file is exposed as the binary property `pdf` for the
+    // email node to attach (we kept the property name `pdf` for backward
+    // compatibility with the existing n8n workflow even though the file
+    // itself is now `.html`; the email recipient sees the real .html
+    // extension because that's the multipart filename).
     //
     // Use the PRODUCTION path (`/webhook/`) once the workflow is Active.
     // While testing in the n8n editor click "Listen for test event" first
@@ -1878,14 +1881,17 @@ PORTAL_JS = r"""
                 customSectionCount: report.customSections ? report.customSections.length : 0,
             };
 
-            // n8n's Webhook node exposes the uploaded file as binary.html for
-            // the email node to attach directly.
+            // n8n's Webhook node exposes the uploaded file as binary.pdf
+            // for the email node to attach. (Name kept as `pdf` to match
+            // the existing n8n workflow — the file itself is .html, and
+            // the email recipient sees `embassy_review_…html` because the
+            // multipart filename carries the real extension.)
             const fd = new FormData();
             fd.append("subject", subject);
             fd.append("summary", summaryOneLine);
             fd.append("bodyText", bodyText);
             fd.append("meta", JSON.stringify(meta));
-            fd.append("html", new File([htmlBlob], baseName + ".html", { type: "text/html" }));
+            fd.append("pdf", new File([htmlBlob], baseName + ".html", { type: "text/html" }));
 
             let networkOk = false;
             let errorDetail = "";
