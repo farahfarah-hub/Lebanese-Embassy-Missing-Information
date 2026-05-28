@@ -1054,20 +1054,26 @@ input.review-url.filled {
    correction textareas inside it — reviewers don't need to tick each row.
    The dimming is scoped by JS to the leaf section only, so a parent marked
    correct never overrides a child's own verdict. */
-.editable-cell.verdict-dimmed { opacity: 0.45; }
+/* When a section is marked "All correct" we both VISUALLY mark the
+   per-row controls as dimmed AND programmatically check the ✅ Correct
+   radio in each row. Keep the dimming SUBTLE so the freshly-ticked
+   green pills are clearly visible (the previous 0.45 opacity +
+   grayscale filter washed them out and made the auto-tick look like
+   it hadn't fired). */
+.editable-cell.verdict-dimmed { opacity: 0.92; }
 .editable-cell.verdict-dimmed .radio-group,
 .editable-cell.verdict-dimmed textarea,
 .editable-cell.verdict-dimmed input {
     pointer-events: none;
-    filter: grayscale(0.5);
 }
 .editable-cell.verdict-dimmed::after {
-    content: "approved with section";
+    content: "✓ auto-approved";
     display: block;
     font-size: 0.7rem;
     color: var(--ok);
     margin-top: 4px;
     font-style: italic;
+    font-weight: 600;
 }
 
 /* Subtle "completed" tint on the whole leaf section once a verdict is set. */
