@@ -1687,7 +1687,9 @@ PORTAL_JS = r"""
         }
         lines.push("");
         lines.push("─".repeat(70));
-        lines.push("Full data also attached as: review.csv · review.pdf · review.json");
+        lines.push("Raw CSV is included below this summary; the reviewer also");
+        lines.push("downloaded matching .csv, .pdf and .json files locally and");
+        lines.push("can send them as attachments on request.");
         return lines.join("\n");
     }
 
@@ -1841,6 +1843,14 @@ PORTAL_JS = r"""
         }
     }
 
+    function downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+    }
+
     async function submitReview() {
         const report = buildReport();
         const s = report.summary;
@@ -1861,37 +1871,42 @@ PORTAL_JS = r"""
         setSubmitState("loading");
         try {
             const csv = buildCSV(report);
-            const emailBody = buildEmailBody(report);
             const json = JSON.stringify(report, null, 2);
             const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
 
+            // Build PDF up-front so the reviewer always gets a local copy even
+            // if the network send fails. PDF generation may fail (CDN blocked,
+            // offline) — that's OK, we still ship CSV + JSON.
             let pdfBlob = null;
             try {
                 pdfBlob = await buildPDFBlob(report);
             } catch (pdfErr) {
-                console.warn("PDF generation failed; submitting without PDF:", pdfErr);
+                console.warn("PDF generation failed:", pdfErr);
             }
+
+            // Email body bundles the readable report + the raw CSV between
+            // markers so the recipient (you) can copy/paste straight into a
+            // spreadsheet. Formspree free tier blocks file uploads, so we
+            // can't attach the CSV/PDF/JSON — but the reviewer's browser
+            // will auto-download them as a backup after a successful send.
+            const emailBody = buildEmailBody(report) +
+                "\n\n" + "=".repeat(70) +
+                "\nCSV DATA (copy everything between the BEGIN/END markers and save as .csv)" +
+                "\n" + "=".repeat(70) +
+                "\n----- BEGIN CSV -----\n" + csv + "\n----- END CSV -----\n";
 
             const fd = new FormData();
             fd.append("_subject", "🇱🇧 Embassy Review submitted — " +
                 s.complete + "/" + s.totalSections + " sections complete");
             fd.append("Submitted at", new Date().toLocaleString());
             fd.append("Sections complete", s.complete + " / " + s.totalSections);
-            fd.append("Approved", String(s.approved));
+            fd.append("Approved as-is", String(s.approved));
             fd.append("Has corrections", String(s.needsCorrections));
             fd.append("Not yet reviewed", String(s.unanswered));
             fd.append("Required fields filled",
                 (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + " / " + s.requiredFieldsTotal);
-            fd.append("message", emailBody);  // shown as the email body by Formspree
-            fd.append("review_csv", new File([csv], "embassy_review_" + stamp + ".csv",
-                { type: "text/csv" }));
-            fd.append("review_json", new File([json], "embassy_review_" + stamp + ".json",
-                { type: "application/json" }));
-            if (pdfBlob) {
-                fd.append("review_pdf", new File([pdfBlob], "embassy_review_" + stamp + ".pdf",
-                    { type: "application/pdf" }));
-            }
-            fd.append("_gotcha", "");  // honeypot — Formspree will silently drop bots
+            fd.append("message", emailBody);
+            fd.append("_gotcha", "");
 
             const resp = await fetch(FORMSPREE_ENDPOINT, {
                 method: "POST",
@@ -1899,10 +1914,17 @@ PORTAL_JS = r"""
                 headers: { Accept: "application/json" },
             });
 
+            // Always offer the local backup files. Whether the network call
+            // succeeded or not, the reviewer has a tangible copy in hand.
+            const baseName = "embassy_review_" + stamp;
+            downloadBlob(new Blob([csv],  { type: "text/csv" }),         baseName + ".csv");
+            downloadBlob(new Blob([json], { type: "application/json" }), baseName + ".json");
+            if (pdfBlob) downloadBlob(pdfBlob,                            baseName + ".pdf");
+
             if (resp.ok) {
-                setSubmitState("success", "✓ Sent! Check the inbox");
-                toast("Submitted — email is on its way ✓");
-                setTimeout(() => setSubmitState("idle"), 5000);
+                setSubmitState("success", "✓ Sent! Files saved locally too");
+                toast("Submitted — email on its way ✓  (CSV/PDF/JSON also downloaded)");
+                setTimeout(() => setSubmitState("idle"), 6000);
             } else {
                 let detail = "";
                 try {
@@ -1910,8 +1932,12 @@ PORTAL_JS = r"""
                     detail = (j.errors && j.errors.map(e => e.message).join("; ")) || j.error || "";
                 } catch (_) {}
                 setSubmitState("error");
-                toast("Submit failed: " + (detail || resp.statusText || "unknown error"), "error");
-                setTimeout(() => setSubmitState("idle"), 6000);
+                toast(
+                    "Email send failed (" + (detail || resp.statusText) +
+                    ") — but your CSV/PDF/JSON were downloaded. You can email them manually.",
+                    "error"
+                );
+                setTimeout(() => setSubmitState("idle"), 9000);
             }
         } catch (err) {
             console.error(err);
