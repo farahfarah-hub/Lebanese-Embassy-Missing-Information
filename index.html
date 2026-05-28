@@ -1096,14 +1096,47 @@ input.review-url.filled {
 }
 .radio-pill:hover { background: #f1f5f9; }
 .radio-pill input { accent-color: var(--brand); margin: 0; }
+/* Default checked state (custom-option radios like "Same / Separate flow"). */
 .radio-pill:has(input:checked) {
     background: var(--brand-soft);
     border-color: var(--brand);
     color: var(--brand);
     font-weight: 600;
 }
+/* When the ✅ Correct option is the one checked → green pill, so the
+   reviewer can scan the section and see at a glance which rows are
+   approved. This also makes the "All correct" verdict's auto-tick
+   blatantly obvious in every row. */
+.radio-pill:has(input[value^="✅"]:checked) {
+    background: #ecfdf5;
+    border-color: #16a34a;
+    color: #166534;
+    font-weight: 700;
+    box-shadow: 0 2px 8px rgba(22, 163, 74, 0.18);
+}
+/* When the ❌ Incorrect option is checked → red pill, matching the
+   verdict-incorrect treatment for visual consistency. */
+.radio-pill:has(input[value^="❌"]:checked) {
+    background: #fef2f2;
+    border-color: #dc2626;
+    color: #991b1b;
+    font-weight: 700;
+    box-shadow: 0 2px 8px rgba(220, 38, 38, 0.18);
+}
 /* Fallback for browsers without :has() */
 .radio-pill input:checked + span { font-weight: 600; }
+
+/* Brief flash when the verdict auto-ticks a row — without it the
+   programmatic check can look "static" and the reviewer thinks
+   nothing happened. */
+@keyframes verdict-autotick-flash {
+    0%   { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.55); }
+    60%  { box-shadow: 0 0 0 8px rgba(22, 163, 74, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
+}
+.radio-pill.verdict-autotick-flash {
+    animation: verdict-autotick-flash 700ms ease-out;
+}
 
 /* Inline reviewer prompts that were embedded in a paragraph rather than a
    table row (used in a couple of "Embassy review of this note" lines). */
@@ -1883,7 +1916,16 @@ details.custom-section textarea.cs-body:focus {
     //
     // Scope: own (non-nested) editable cells / radios only. Nested
     // sub-sections carry their own verdict and manage their own state.
-    function applyVerdictStateToSection(detailsEl) {
+    function flashPill(pill) {
+        if (!pill) return;
+        pill.classList.remove('verdict-autotick-flash');
+        // force reflow so re-adding the class restarts the animation
+        void pill.offsetWidth;
+        pill.classList.add('verdict-autotick-flash');
+        setTimeout(() => pill.classList.remove('verdict-autotick-flash'), 750);
+    }
+
+    function applyVerdictStateToSection(detailsEl, userInitiated) {
         const verdict = sectionVerdict(detailsEl);
         if (verdict) detailsEl.setAttribute('data-verdict-state', verdict);
         else detailsEl.removeAttribute('data-verdict-state');
@@ -1912,8 +1954,16 @@ details.custom-section textarea.cs-body:focus {
             ownReviewRadios
                 .filter(r => r.value && r.value.indexOf('✅') === 0)
                 .forEach(r => {
+                    const wasChecked = r.checked;
                     r.checked = true;
                     r.dataset.autoFromVerdict = 'true';
+                    // Flash the pill ONLY when (1) the reviewer just clicked
+                    // the verdict (not on initial load) and (2) the radio
+                    // actually transitioned from unchecked → checked. This
+                    // gives unambiguous "yes the auto-tick fired" feedback.
+                    if (userInitiated && !wasChecked) {
+                        flashPill(r.closest('.radio-pill'));
+                    }
                 });
         } else {
             ownReviewRadios
@@ -2486,7 +2536,7 @@ details.custom-section textarea.cs-body:focus {
             const t = e.target;
             if (t && t.dataset && t.dataset.verdict === "true") {
                 const sec = t.closest('details[data-section-id]');
-                if (sec) applyVerdictStateToSection(sec);
+                if (sec) applyVerdictStateToSection(sec, /*userInitiated*/true);
             }
             scheduleSave();
             updateProgress();
