@@ -101,38 +101,77 @@ def replace_cell_with_radio(cell: Tag, options: list[str]) -> None:
     cell.append(group)
 
 
-def replace_cell_with_textarea(cell: Tag, placeholder: str = "Type the correction or note…") -> None:
+def replace_cell_with_textarea(
+    cell: Tag,
+    placeholder: str = "Type the correction or note…",
+    required: bool = False,
+) -> None:
     cell.clear()
-    cell["class"] = (cell.get("class") or []) + ["editable-cell", "textarea-cell"]
+    classes = (cell.get("class") or []) + ["editable-cell", "textarea-cell"]
+    if required:
+        classes.append("required")
+    cell["class"] = classes
     name = next_field_id("answer")
-    ta = _new_tag(
-        "textarea",
-        {
-            "name": name,
-            "rows": "2",
-            "placeholder": placeholder,
-            "data-field-name": name,
-            "class": "review-textarea",
-        },
-    )
-    cell.append(ta)
+    attrs = {
+        "name": name,
+        "rows": "2",
+        "placeholder": "This field MUST be filled in — please provide the real value." if required else placeholder,
+        "data-field-name": name,
+        "class": "review-textarea",
+    }
+    if required:
+        attrs["data-required"] = "true"
+    cell.append(_new_tag("textarea", attrs))
 
 
-def replace_cell_with_url_input(cell: Tag) -> None:
+def replace_cell_with_url_input(cell: Tag, required: bool = False) -> None:
     cell.clear()
-    cell["class"] = (cell.get("class") or []) + ["editable-cell", "url-cell"]
+    classes = (cell.get("class") or []) + ["editable-cell", "url-cell"]
+    if required:
+        classes.append("required")
+    cell["class"] = classes
     name = next_field_id("url")
-    inp = _new_tag(
-        "input",
-        {
-            "type": "url",
-            "name": name,
-            "placeholder": "https://…",
-            "data-field-name": name,
-            "class": "review-url",
-        },
-    )
-    cell.append(inp)
+    attrs = {
+        "type": "url",
+        "name": name,
+        "placeholder": "Paste the real official URL — must be filled" if required else "https://…",
+        "data-field-name": name,
+        "class": "review-url",
+    }
+    if required:
+        attrs["data-required"] = "true"
+    cell.append(_new_tag("input", attrs))
+
+
+def make_required_badge(cell: Tag) -> None:
+    """Convert a review cell to a 'Must be filled' marker (no radio buttons)."""
+    cell.clear()
+    cell["class"] = (cell.get("class") or []) + ["editable-cell", "must-fill-marker"]
+    badge = _new_tag("span", {"class": "required-badge", "title": "This row is a placeholder or dummy value — please provide the real information in the next column."})
+    badge.string = "Must be filled"
+    cell.append(badge)
+
+
+_PLACEHOLDER_RE = re.compile(r"⚠️|\[to fill\]|^\s*not specified\s*$", re.I)
+
+
+def row_requires_fill(read_only_cells: list[Tag], headers: list[str]) -> bool:
+    """A row is treated as 'must be filled' (no ✅/❌ choice, required input)
+    if any of its read-only cells is a yellow placeholder, contains a ⚠️
+    marker, says '[to fill]' or 'Not specified', OR the row belongs to a
+    table whose data column is literally called 'Dummy link' (the §10
+    summary of dummy links to replace).
+    """
+    if any("dummy link" in h for h in headers):
+        return True
+    for cell in read_only_cells:
+        classes = cell.get("class") or []
+        if "block-color-yellow_background" in classes:
+            return True
+        text = cell.get_text(" ", strip=True)
+        if _PLACEHOLDER_RE.search(text):
+            return True
+    return False
 
 
 VERDICT_OPTIONS: list[tuple[str, str]] = [
@@ -329,6 +368,12 @@ def transform_table(table: Tag) -> None:
             # tbody rows in this Notion export are wrapped in a <div> per row,
             # so the <tr> may be the actual parent we want.
             cells = row.find_all("td")
+
+        # Decide if this row is "must be filled" by inspecting the read-only cells
+        # (i.e. the ones whose column type isn't review/url/textarea).
+        read_only = [c for i, c in enumerate(cells) if i not in column_types]
+        required = row_requires_fill(read_only, headers)
+
         for idx, cell in enumerate(cells):
             ctype = column_types.get(idx)
             if ctype is None:
@@ -338,29 +383,35 @@ def transform_table(table: Tag) -> None:
             checkbox_options = parse_checkbox_options(cell_text)
 
             if checkbox_options:
-                # Any cell with ☐ tokens becomes a radio group, regardless of
-                # the declared column type (handles "☐ Same  ☐ Different" rows).
                 glyphs = {opt.strip() for opt in checkbox_options}
                 if glyphs.issubset({"✅", "❌", "✏️"}):
-                    # Standard reviewer-status row "☐ ✅  ☐ ❌  ☐ ✏️" —
-                    # collapse to a simple right/wrong choice per user request.
-                    replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect"])
+                    # Standard reviewer-status row. On required rows we
+                    # don't ask "is it correct?" — by definition it isn't.
+                    if required:
+                        make_required_badge(cell)
+                    else:
+                        replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect"])
                 else:
+                    # Custom-option choices (e.g. "Same / Separate flow") stay
+                    # interactive even on required rows, because they're
+                    # content choices the embassy still needs to pick.
                     replace_cell_with_radio(cell, checkbox_options)
                 continue
 
             if ctype == "review":
-                # Review column with no glyphs — keep it simple: just ✅ / ❌.
-                replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect"])
+                if required:
+                    make_required_badge(cell)
+                else:
+                    replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect"])
             elif ctype == "url":
-                replace_cell_with_url_input(cell)
+                replace_cell_with_url_input(cell, required=required)
             else:  # textarea
                 placeholder = (
                     "Type the official information…"
                     if "correction" in headers[idx] or "embassy answer" in headers[idx]
                     else "Type your answer…"
                 )
-                replace_cell_with_textarea(cell, placeholder)
+                replace_cell_with_textarea(cell, placeholder, required=required)
 
 
 _INLINE_REVIEW_RE = re.compile(r"☐\s*✅[^☐]*☐\s*❌[^☐]*☐\s*✏️[^☐<]*")
@@ -544,6 +595,24 @@ article.page { background: transparent; }
     text-align: right;
 }
 .portal-appbar .save-status.saved { color: var(--ok); }
+.portal-appbar .required-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #fef3c7;
+    color: #92400e;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    border: 1px solid #fbbf24;
+    white-space: nowrap;
+}
+.portal-appbar .required-pill.all-done {
+    background: #dcfce7;
+    color: #166534;
+    border-color: #86efac;
+}
 
 /* --- Page title --- */
 header h1.page-title {
@@ -687,6 +756,72 @@ input.review-url.filled {
 .embassy-notes-block textarea.review-textarea:focus {
     min-height: 200px;
     background: #fffdf6;
+}
+
+/* --- Required-fill rows --- */
+/* Rows where the chatbot currently shows a placeholder / dummy / yellow
+   marker. There is no "correct vs incorrect" to ask — the real value must
+   be filled in. */
+.required-badge {
+    display: inline-block;
+    background: #fef3c7;
+    color: #92400e;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    border: 1.5px solid #fbbf24;
+    white-space: nowrap;
+    letter-spacing: 0.02em;
+}
+.required-badge::before { content: "🔒 "; }
+.editable-cell.must-fill-marker { background: #fffbeb !important; }
+
+/* Required input styling — orange while empty, green once filled. */
+.editable-cell.required {
+    background: #fffbeb !important;
+    box-shadow: inset 3px 0 0 #f59e0b !important;
+}
+.editable-cell.required textarea.review-textarea,
+.editable-cell.required input.review-url {
+    border-color: #fbbf24;
+    background: #fffdf2;
+}
+.editable-cell.required textarea.review-textarea::placeholder,
+.editable-cell.required input.review-url::placeholder {
+    color: #b45309;
+    font-weight: 500;
+}
+.editable-cell.required textarea.review-textarea:focus,
+.editable-cell.required input.review-url:focus {
+    border-color: #d97706;
+    box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.18), 0 8px 28px rgba(217, 119, 6, 0.18);
+    background: white;
+}
+.editable-cell.required.filled-required {
+    background: #f0fdf4 !important;
+    box-shadow: inset 3px 0 0 var(--ok) !important;
+}
+.editable-cell.required.filled-required textarea.review-textarea,
+.editable-cell.required.filled-required input.review-url {
+    border-color: #86efac;
+    background: #f7fef9;
+}
+
+/* Required rows ignore the "all correct" dimming — the reviewer still has
+   to provide the real value even after approving the section. */
+.editable-cell.required.verdict-dimmed,
+.editable-cell.must-fill-marker.verdict-dimmed {
+    opacity: 1 !important;
+}
+.editable-cell.required.verdict-dimmed textarea,
+.editable-cell.required.verdict-dimmed input {
+    pointer-events: auto !important;
+    filter: none !important;
+}
+.editable-cell.required.verdict-dimmed::after,
+.editable-cell.must-fill-marker.verdict-dimmed::after {
+    content: none !important;
 }
 
 /* --- Radio pill group --- */
@@ -1052,9 +1187,10 @@ APPBAR_HTML = """
       <small>Lebanese Embassy WhatsApp Chatbot — Knowledge base verification</small>
     </div>
   </div>
-  <div class="progress" title="Share of editable fields you've completed">
+  <div class="progress" title="Share of sections you've reviewed">
     <div class="bar"><span id="progress-bar-fill"></span></div>
     <span id="progress-label">0%</span>
+    <span class="required-pill" id="required-pill" hidden title="Placeholders and dummy links waiting for the real value"></span>
   </div>
   <div class="save-status" id="save-status">Not saved yet</div>
 </div>
@@ -1087,6 +1223,7 @@ PORTAL_JS = r"""
     const saveStatusEl = document.getElementById("save-status");
     const progressFill = document.getElementById("progress-bar-fill");
     const progressLabel = document.getElementById("progress-label");
+    const requiredPill = document.getElementById("required-pill");
     const toastEl = document.getElementById("portal-toast");
 
     let saveTimer = null;
@@ -1187,15 +1324,55 @@ PORTAL_JS = r"""
         return checked ? checked.value : null;
     }
 
+    // A section counts as "complete" only when a verdict is set AND every
+    // required field inside it has a value. Pure-verdict sections (no
+    // required fields) are complete as soon as the verdict is picked.
+    function ownRequiredCells(detailsEl) {
+        const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
+        return Array.from(detailsEl.querySelectorAll('.editable-cell.required'))
+            .filter(c => !nested.some(n => n.contains(c)));
+    }
+
+    function isSectionComplete(detailsEl) {
+        if (!sectionVerdict(detailsEl)) return false;
+        const required = ownRequiredCells(detailsEl);
+        return required.every(c => c.classList.contains('filled-required'));
+    }
+
     function updateProgress() {
         const sections = allSectionEls();
         const total = sections.length;
         let done = 0;
-        sections.forEach(s => { if (sectionVerdict(s)) done++; });
+        sections.forEach(s => { if (isSectionComplete(s)) done++; });
         const pct = total === 0 ? 0 : Math.round((done / total) * 100);
         if (progressFill) progressFill.style.width = pct + "%";
         if (progressLabel) {
-            progressLabel.textContent = `${pct}%  (${done}/${total} sections)`;
+            progressLabel.textContent = `${pct}%  (${done}/${total} sections complete)`;
+        }
+        updateRequiredPill();
+    }
+
+    // Tracks every must-fill cell and reflects state in the appbar pill.
+    function updateRequiredFilledState() {
+        document.querySelectorAll('.editable-cell.required').forEach(cell => {
+            const input = cell.querySelector('textarea, input');
+            if (input && input.value.trim() !== "") cell.classList.add('filled-required');
+            else cell.classList.remove('filled-required');
+        });
+    }
+
+    function updateRequiredPill() {
+        if (!requiredPill) return;
+        const all = document.querySelectorAll('.editable-cell.required');
+        if (all.length === 0) { requiredPill.hidden = true; return; }
+        const empty = document.querySelectorAll('.editable-cell.required:not(.filled-required)').length;
+        requiredPill.hidden = false;
+        if (empty === 0) {
+            requiredPill.classList.add('all-done');
+            requiredPill.textContent = `✓ All ${all.length} required fields filled`;
+        } else {
+            requiredPill.classList.remove('all-done');
+            requiredPill.textContent = `🔒 ${empty} required ${empty === 1 ? "field" : "fields"} still empty`;
         }
     }
 
@@ -1242,15 +1419,29 @@ PORTAL_JS = r"""
                           (sum ? sum.textContent.trim() : "(untitled)");
             const verdict = sectionVerdict(sec);
             const items = collectFieldsLive(sec);
-            return { title, verdict: verdict || "unanswered", items };
+            const required = ownRequiredCells(sec);
+            const requiredUnfilled = required.filter(c => !c.classList.contains('filled-required')).length;
+            return {
+                title,
+                verdict: verdict || "unanswered",
+                requiredFields: required.length,
+                requiredFieldsUnfilled: requiredUnfilled,
+                complete: isSectionComplete(sec),
+                items,
+            };
         });
+        const requiredCells = document.querySelectorAll('.editable-cell.required');
+        const requiredUnfilledTotal = document.querySelectorAll('.editable-cell.required:not(.filled-required)').length;
         return {
             generatedAt: new Date().toISOString(),
             summary: {
                 totalSections: sections.length,
+                complete: sections.filter(s => s.complete).length,
                 approved: sections.filter(s => s.verdict === "correct").length,
                 needsCorrections: sections.filter(s => s.verdict === "incorrect").length,
                 unanswered: sections.filter(s => s.verdict === "unanswered").length,
+                requiredFieldsTotal: requiredCells.length,
+                requiredFieldsUnfilled: requiredUnfilledTotal,
             },
             sections,
             customSections: collectCustomSections(),
@@ -1292,7 +1483,8 @@ PORTAL_JS = r"""
                     if (lbl) label = lbl.textContent.trim().replace(/:$/, "");
                 }
             }
-            items.push({ type: "text", question: label || "(unlabeled)", answer: v });
+            const required = t.dataset.required === "true";
+            items.push({ type: "text", question: label || "(unlabeled)", answer: v, ...(required ? { required: true } : {}) });
         });
         detailsEl.querySelectorAll('input[type="url"]').forEach(t => {
             if (!include(t)) return;
@@ -1304,7 +1496,8 @@ PORTAL_JS = r"""
                 const firstTd = tr.querySelector('td');
                 if (firstTd) label = firstTd.textContent.trim();
             }
-            items.push({ type: "url", question: label || "Link", answer: v });
+            const required = t.dataset.required === "true";
+            items.push({ type: "url", question: label || "Link", answer: v, ...(required ? { required: true } : {}) });
         });
         return items;
     }
@@ -1382,12 +1575,19 @@ PORTAL_JS = r"""
     document.addEventListener("DOMContentLoaded", () => {
         load();
         document.querySelectorAll('textarea, input[type="url"]').forEach(markFilled);
+        updateRequiredFilledState();
         refreshAllVerdictStates();
         updateProgress();
 
         document.body.addEventListener("input", (e) => {
             const t = e.target;
             if (t.matches('textarea, input[type="url"], input[type="text"]')) markFilled(t);
+            // Required cells: refresh just the one being typed in (cheap), then update pill.
+            const cell = t.closest && t.closest('.editable-cell.required');
+            if (cell) {
+                if (t.value && t.value.trim() !== "") cell.classList.add('filled-required');
+                else cell.classList.remove('filled-required');
+            }
             scheduleSave();
             updateProgress();
         });
