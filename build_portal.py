@@ -1257,17 +1257,16 @@ PORTAL_JS = r"""
     // Submit POSTs multipart/form-data here. The n8n workflow handles the
     // email (with PDF / CSV / JSON attached) on its end.
     //
-    // To finish setup: replace the BASE URL below with your real n8n host.
-    // For n8n Cloud the pattern is:    https://<workspace>.app.n8n.cloud
-    // For self-hosted instances:       https://n8n.yourdomain.com
-    // The webhook path 47bd183e-...    is hard-wired to your Webhook node.
+    // IMPORTANT: the Webhook node in n8n must have **HTTP Method = POST**
+    // (it defaults to GET). It also needs "Binary Data" enabled so the
+    // uploaded files are exposed as binary properties named `pdf`, `csv`,
+    // `json` for the email node to attach.
     //
-    // Use the PRODUCTION path (`/webhook/`) once your workflow is
-    // activated. While you're still building it in the n8n editor, swap
-    // to the test path (`/webhook-test/`) — it only listens for one POST
-    // per click on "Listen for test event".
+    // Use the PRODUCTION path (`/webhook/`) once the workflow is Active.
+    // While testing in the n8n editor click "Listen for test event" first
+    // and swap to `/webhook-test/` — it accepts one POST per click.
     const N8N_WEBHOOK_URL =
-        "https://REPLACE-ME.app.n8n.cloud/webhook/47bd183e-61f3-49c9-952a-728d85ad2551";
+        "https://farah-farah555.app.n8n.cloud/webhook/47bd183e-61f3-49c9-952a-728d85ad2551";
 
     const JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
     const AUTOTABLE_URL = "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js";
@@ -1930,7 +1929,7 @@ PORTAL_JS = r"""
             let errorDetail = "";
 
             // Guard against the obvious "user forgot to fill in the URL" case.
-            if (N8N_WEBHOOK_URL.includes("REPLACE-ME")) {
+            if (N8N_WEBHOOK_URL.includes("REPLACE-ME") || !N8N_WEBHOOK_URL) {
                 errorDetail = "n8n webhook URL not configured yet — see N8N_WEBHOOK_URL in the page source";
             } else {
                 try {
