@@ -2115,19 +2115,24 @@ details.custom-section textarea.cs-body:focus {
         card.className = 'custom-section';
         card.dataset.csId = String(customCounter);
         card.open = true;
-        card.innerHTML =
-            '<summary>' +
-              '<span class="cs-number">11.</span>' +
-              '<input type="text" class="cs-title" ' +
-                'placeholder="New section title (e.g. \\'Online appointment booking\\')" ' +
-                'aria-label="Section title">' +
-              '<button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>' +
-            '</summary>' +
-            '<div class="cs-body-wrapper">' +
-              '<textarea class="cs-body" ' +
-                'placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…" ' +
-                'aria-label="Section content"></textarea>' +
-            '</div>';
+        // Built as a template literal so embedded apostrophes / quotes
+        // in the placeholder text don't blow up the parser. A previous
+        // single-quoted version with \\' escapes silently broke the
+        // whole inline <script>, taking every event listener (Submit,
+        // verdict auto-tick, Clear, JSON…) with it.
+        card.innerHTML = `
+            <summary>
+              <span class="cs-number">11.</span>
+              <input type="text" class="cs-title"
+                     placeholder="New section title (e.g. Online appointment booking)"
+                     aria-label="Section title">
+              <button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>
+            </summary>
+            <div class="cs-body-wrapper">
+              <textarea class="cs-body"
+                        placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…"
+                        aria-label="Section content"></textarea>
+            </div>`;
 
         const summaryEl  = card.querySelector('summary');
         const titleInput = card.querySelector('.cs-title');

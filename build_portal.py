@@ -1871,19 +1871,24 @@ PORTAL_JS = r"""
         card.className = 'custom-section';
         card.dataset.csId = String(customCounter);
         card.open = true;
-        card.innerHTML =
-            '<summary>' +
-              '<span class="cs-number">11.</span>' +
-              '<input type="text" class="cs-title" ' +
-                'placeholder="New section title (e.g. \\'Online appointment booking\\')" ' +
-                'aria-label="Section title">' +
-              '<button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>' +
-            '</summary>' +
-            '<div class="cs-body-wrapper">' +
-              '<textarea class="cs-body" ' +
-                'placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…" ' +
-                'aria-label="Section content"></textarea>' +
-            '</div>';
+        // Built as a template literal so embedded apostrophes / quotes
+        // in the placeholder text don't blow up the parser. A previous
+        // single-quoted version with \\' escapes silently broke the
+        // whole inline <script>, taking every event listener (Submit,
+        // verdict auto-tick, Clear, JSON…) with it.
+        card.innerHTML = `
+            <summary>
+              <span class="cs-number">11.</span>
+              <input type="text" class="cs-title"
+                     placeholder="New section title (e.g. Online appointment booking)"
+                     aria-label="Section title">
+              <button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>
+            </summary>
+            <div class="cs-body-wrapper">
+              <textarea class="cs-body"
+                        placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…"
+                        aria-label="Section content"></textarea>
+            </div>`;
 
         const summaryEl  = card.querySelector('summary');
         const titleInput = card.querySelector('.cs-title');
@@ -2335,6 +2340,50 @@ def build() -> None:
     print(f"Wrote {DST}  ({DST.stat().st_size:,} bytes)")
     print("Transform stats:", stats)
     print(f"Editable field ids generated: {_field_counter}")
+
+    # Guard: if `node` is available, syntax-check the inline portal JS.
+    # A previous commit shipped a script with broken quote-escaping
+    # which silently disabled every event handler on the page.
+    _syntax_check_inline_js()
+
+
+def _syntax_check_inline_js() -> None:
+    """Run `node --check` against the inline <script> we just emitted.
+    Soft-fail (warn only) if node isn't installed, so the build still
+    works in environments without it."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not shutil.which("node"):
+        print("⚠  node not found — skipping inline-JS syntax check")
+        return
+
+    html = DST.read_text(encoding="utf-8")
+    # The inline portal script is the only real <script> in the document,
+    # but its body contains the literal substring "<script>" inside JS
+    # comments (which the browser correctly ignores — only "</script>"
+    # ends a script). Slice from the first opening to the last closing.
+    open_idx = html.find("<script>")
+    close_idx = html.rfind("</script>")
+    if open_idx == -1 or close_idx == -1 or close_idx < open_idx:
+        print("⚠  couldn't isolate inline script for syntax check")
+        return
+    inline_js = html[open_idx + len("<script>"): close_idx]
+
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(inline_js)
+        tmp_path = f.name
+
+    result = subprocess.run(
+        ["node", "--check", tmp_path], capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        print("Inline JS syntax check: OK ✓")
+    else:
+        print("🛑 Inline JS has a SYNTAX ERROR — the page will be inert:")
+        print(result.stderr.strip())
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
