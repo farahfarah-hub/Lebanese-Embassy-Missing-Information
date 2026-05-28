@@ -135,29 +135,142 @@ def replace_cell_with_url_input(cell: Tag) -> None:
     cell.append(inp)
 
 
-def convert_todo_list(ul: Tag) -> None:
-    """Convert a Notion to-do-list ``<ul>`` to a single checkbox."""
-    ul["class"] = ["status-checkbox-list"]
-    for li in ul.find_all("li", recursive=False):
-        label_text_node = li.find("span", class_="to-do-children-unchecked")
-        label_text = label_text_node.get_text(" ", strip=True) if label_text_node else li.get_text(" ", strip=True)
-        for child in list(li.children):
-            child.extract()
-        name = next_field_id("status")
-        label = _new_tag("label", {"class": "status-checkbox"})
+VERDICT_OPTIONS: list[tuple[str, str]] = [
+    ("correct", "✅ All correct — no edits needed"),
+    ("incorrect", "❌ I have corrections / answers below"),
+]
+
+
+def build_verdict_widget(section_label: str | None = None) -> tuple[Tag, str]:
+    """Build a Section-verdict block (label + 2-option radio group)."""
+    verdict_id = next_field_id("verdict")
+    wrapper = _new_tag("div", {"class": "section-verdict", "data-verdict-id": verdict_id})
+    label_p = _new_tag("p", {"class": "section-verdict-label"})
+    label_p.string = (
+        f"Section status — {section_label}:" if section_label else "Section status:"
+    )
+    wrapper.append(label_p)
+
+    group = _new_tag("div", {"class": "verdict-group", "data-field": verdict_id})
+    for idx, (opt_value, opt_label) in enumerate(VERDICT_OPTIONS):
+        opt_id = f"{verdict_id}_{idx}"
+        lbl = _new_tag("label", {"class": f"verdict-pill verdict-{opt_value}"})
         inp = _new_tag(
             "input",
             {
-                "type": "checkbox",
-                "name": name,
-                "data-field-name": name,
+                "type": "radio",
+                "name": verdict_id,
+                "id": opt_id,
+                "value": opt_value,
+                "data-field-name": verdict_id,
+                "data-verdict": "true",
             },
         )
         span = _new_tag("span")
-        span.string = label_text
-        label.append(inp)
-        label.append(span)
-        li.append(label)
+        span.string = opt_label
+        lbl.append(inp)
+        lbl.append(span)
+        group.append(lbl)
+    wrapper.append(group)
+    return wrapper, verdict_id
+
+
+_OVERALL_RE = re.compile(r"^\s*overall review status", re.I)
+_OVERALL_LABEL_RE = re.compile(
+    r"overall review status(?:\s+for\s+([^:]+))?\s*:?", re.I
+)
+
+
+def convert_section_verdicts(soup: BeautifulSoup) -> int:
+    """Find every "Overall review status …" intro paragraph and replace it
+    (plus the 3 following Notion to-do-list ULs) with a single 2-option
+    Section Verdict radio group. Tags the enclosing leaf ``<details>`` with
+    ``data-section-id`` for progress tracking.
+    """
+    converted = 0
+    paragraphs = list(soup.find_all("p"))
+    for p in paragraphs:
+        text = p.get_text(strip=True)
+        if not _OVERALL_RE.match(text):
+            continue
+
+        m = _OVERALL_LABEL_RE.match(text)
+        section_label = (m.group(1).strip() if m and m.group(1) else "") or None
+
+        wrapper = p.parent
+        if wrapper is None:
+            continue
+
+        # Collect the next 3 wrappers that contain a to-do-list <ul>.
+        todo_wrappers: list[Tag] = []
+        for sib in wrapper.next_siblings:
+            if isinstance(sib, Tag):
+                ul = sib.find("ul", class_="to-do-list")
+                if ul is not None:
+                    todo_wrappers.append(sib)
+                    if len(todo_wrappers) >= 3:
+                        break
+        if len(todo_wrappers) < 2:
+            continue  # Pattern doesn't match — leave alone.
+
+        verdict_block, verdict_id = build_verdict_widget(section_label)
+        wrapper.replace_with(verdict_block)
+        for sib in todo_wrappers:
+            sib.decompose()
+
+        leaf = verdict_block.find_parent("details")
+        if leaf is not None:
+            leaf["data-section-id"] = verdict_id
+            if section_label:
+                leaf["data-section-label"] = section_label
+        converted += 1
+    return converted
+
+
+def inject_verdicts_into_remaining_leaves(soup: BeautifulSoup) -> int:
+    """Add a Section Verdict to every leaf ``<details>`` that contains
+    editable fields of its own but doesn't already have one (e.g. the
+    open-question-only subsections in §3 and §9).
+    """
+    injected = 0
+    for details in soup.find_all("details"):
+        if details.get("data-section-id"):
+            continue
+
+        # Find nested <details> so we can exclude their descendants when
+        # deciding whether THIS details has its own editable content.
+        nested = [d for d in details.find_all("details") if d is not details]
+        nested_desc_ids = set()
+        for nd in nested:
+            nested_desc_ids.add(id(nd))
+            for c in nd.descendants:
+                nested_desc_ids.add(id(c))
+
+        has_own_field = False
+        for tag in details.find_all(class_=re.compile(r"editable-cell|embassy-notes-block")):
+            if id(tag) not in nested_desc_ids:
+                has_own_field = True
+                break
+        if not has_own_field:
+            continue
+
+        summary = details.find("summary", recursive=False)
+        section_label = summary.get_text(" ", strip=True) if summary else None
+        verdict_block, verdict_id = build_verdict_widget(section_label)
+
+        indented = details.find("div", class_="indented", recursive=False)
+        if indented is not None:
+            indented.insert(0, verdict_block)
+        elif summary is not None:
+            summary.insert_after(verdict_block)
+        else:
+            details.insert(0, verdict_block)
+
+        details["data-section-id"] = verdict_id
+        if section_label:
+            details["data-section-label"] = section_label
+        injected += 1
+    return injected
 
 
 def convert_embassy_notes_paragraph(p: Tag) -> None:
@@ -227,12 +340,18 @@ def transform_table(table: Tag) -> None:
             if checkbox_options:
                 # Any cell with ☐ tokens becomes a radio group, regardless of
                 # the declared column type (handles "☐ Same  ☐ Different" rows).
-                replace_cell_with_radio(cell, checkbox_options)
+                glyphs = {opt.strip() for opt in checkbox_options}
+                if glyphs.issubset({"✅", "❌", "✏️"}):
+                    # Standard reviewer-status row "☐ ✅  ☐ ❌  ☐ ✏️" —
+                    # collapse to a simple right/wrong choice per user request.
+                    replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect"])
+                else:
+                    replace_cell_with_radio(cell, checkbox_options)
                 continue
 
             if ctype == "review":
-                # Review column with no glyphs — default to ✅ / ❌ / ✏️.
-                replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect", "✏️ Needs update"])
+                # Review column with no glyphs — keep it simple: just ✅ / ❌.
+                replace_cell_with_radio(cell, ["✅ Correct", "❌ Incorrect"])
             elif ctype == "url":
                 replace_cell_with_url_input(cell)
             else:  # textarea
@@ -244,17 +363,59 @@ def transform_table(table: Tag) -> None:
                 replace_cell_with_textarea(cell, placeholder)
 
 
+_INLINE_REVIEW_RE = re.compile(r"☐\s*✅[^☐]*☐\s*❌[^☐]*☐\s*✏️[^☐<]*")
+
+
+def convert_inline_review_paragraphs(soup: BeautifulSoup) -> int:
+    """Some free-text notes in the workbook end with an inline reviewer
+    prompt like ``☐ ✅ Correct  ☐ ❌ Incorrect  ☐ ✏️ Needs update``
+    (not inside a table). Replace that suffix with a 2-option radio group.
+    """
+    converted = 0
+    for p in list(soup.find_all("p")):
+        text = p.get_text()
+        if not _INLINE_REVIEW_RE.search(text):
+            continue
+        # Remove the trailing checkbox tokens from the paragraph text and append
+        # a real radio group in their place.
+        for node in list(p.descendants):
+            if isinstance(node, NavigableString):
+                new_text = _INLINE_REVIEW_RE.sub("", str(node))
+                if new_text != str(node):
+                    node.replace_with(NavigableString(new_text))
+        # Append the radio group widget.
+        widget = _new_tag("span", {"class": "inline-review"})
+        name = next_field_id("review")
+        for idx, opt in enumerate(["✅ Correct", "❌ Incorrect"]):
+            opt_id = f"{name}_{idx}"
+            lbl = _new_tag("label", {"class": "radio-pill"})
+            inp = _new_tag("input", {
+                "type": "radio", "name": name, "id": opt_id, "value": opt,
+                "data-field-name": name,
+            })
+            lbl.append(inp)
+            sp = _new_tag("span")
+            sp.string = opt
+            lbl.append(sp)
+            widget.append(lbl)
+        p.append(widget)
+        converted += 1
+    return converted
+
+
 def transform(soup: BeautifulSoup) -> dict:
     """Mutate the soup in place. Returns a small build manifest."""
-    stats = {"tables": 0, "todo_lists": 0, "notes_blocks": 0}
+    stats = {
+        "tables": 0,
+        "notes_blocks": 0,
+        "inline_reviews": 0,
+        "verdicts_converted": 0,
+        "verdicts_injected": 0,
+    }
 
     for table in soup.find_all("table", class_="simple-table"):
         transform_table(table)
         stats["tables"] += 1
-
-    for ul in soup.find_all("ul", class_="to-do-list"):
-        convert_todo_list(ul)
-        stats["todo_lists"] += 1
 
     for p in soup.find_all("p"):
         em = p.find("em")
@@ -264,6 +425,14 @@ def transform(soup: BeautifulSoup) -> dict:
         if em_text.startswith("embassy notes") or em_text.startswith("embassy note"):
             convert_embassy_notes_paragraph(p)
             stats["notes_blocks"] += 1
+
+    stats["inline_reviews"] = convert_inline_review_paragraphs(soup)
+
+    # Section verdicts must run AFTER tables/notes so leaf <details> already
+    # contain `.editable-cell` markers used to decide which leaves still need
+    # a verdict injected.
+    stats["verdicts_converted"] = convert_section_verdicts(soup)
+    stats["verdicts_injected"] = inject_verdicts_into_remaining_leaves(soup)
 
     return stats
 
@@ -481,19 +650,43 @@ input.review-url {
     color: var(--text);
     background: #fdfdfd;
     resize: vertical;
-    transition: border-color 120ms, box-shadow 120ms;
+    transition: min-height 200ms ease, font-size 200ms ease,
+                border-color 120ms, box-shadow 200ms, background 120ms;
 }
-textarea.review-textarea:focus,
+
+/* Focus-expand: when the reviewer clicks into a field, give them generous
+   room and a bigger font so they can actually see what they are writing. */
+textarea.review-textarea:focus {
+    outline: none;
+    border-color: var(--brand);
+    box-shadow: 0 8px 28px rgba(12, 74, 110, 0.18);
+    background: white;
+    min-height: 160px;
+    font-size: 1rem;
+    line-height: 1.55;
+    padding: 12px 14px;
+}
 input.review-url:focus {
     outline: none;
     border-color: var(--brand);
-    box-shadow: 0 0 0 3px rgba(12, 74, 110, 0.15);
+    box-shadow: 0 6px 22px rgba(12, 74, 110, 0.18);
     background: white;
+    min-height: 46px;
+    font-size: 1rem;
+    padding: 12px 14px;
 }
+
 textarea.review-textarea.filled,
 input.review-url.filled {
     background: #f0fdf4;
     border-color: #86efac;
+}
+
+/* The dedicated Embassy notes block already gives plenty of room; make its
+   focused state extra prominent. */
+.embassy-notes-block textarea.review-textarea:focus {
+    min-height: 200px;
+    background: #fffdf6;
 }
 
 /* --- Radio pill group --- */
@@ -526,31 +719,100 @@ input.review-url.filled {
 /* Fallback for browsers without :has() */
 .radio-pill input:checked + span { font-weight: 600; }
 
-/* --- Section status checkboxes (former Notion to-do lists) --- */
-ul.status-checkbox-list {
-    list-style: none;
-    padding: 0;
-    margin: 6px 0;
+/* Inline reviewer prompts that were embedded in a paragraph rather than a
+   table row (used in a couple of "Embassy review of this note" lines). */
+.inline-review {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: 8px;
 }
-ul.status-checkbox-list li { margin: 2px 0; }
-.status-checkbox {
+
+/* --- Section verdict pill (replaces the old 3-checkbox status list) --- */
+.section-verdict {
+    margin: 14px 0 18px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: linear-gradient(180deg, #f8fafc, #eef2ff);
+    border: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+}
+.section-verdict-label {
+    margin: 0 !important;
+    font-weight: 600;
+    color: var(--brand);
+    font-size: 0.9rem;
+}
+.verdict-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.verdict-pill {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
+    padding: 10px 16px;
+    border: 1.5px solid var(--line-strong);
+    border-radius: 999px;
+    background: white;
+    font-size: 0.92rem;
+    font-weight: 500;
     cursor: pointer;
-    background: #fafafa;
-    transition: background 120ms;
+    user-select: none;
+    transition: background 140ms, border-color 140ms, transform 140ms;
 }
-.status-checkbox:hover { background: var(--brand-soft); }
-.status-checkbox input { accent-color: var(--brand); width: 16px; height: 16px; }
-.status-checkbox:has(input:checked) {
+.verdict-pill:hover { transform: translateY(-1px); }
+.verdict-pill input { accent-color: var(--brand); margin: 0; }
+.verdict-pill.verdict-correct:has(input:checked) {
     background: #ecfdf5;
-    border-color: #86efac;
+    border-color: #16a34a;
     color: #166534;
+    font-weight: 700;
+    box-shadow: 0 4px 14px rgba(22, 163, 74, 0.18);
 }
+.verdict-pill.verdict-incorrect:has(input:checked) {
+    background: #fef2f2;
+    border-color: #dc2626;
+    color: #991b1b;
+    font-weight: 700;
+    box-shadow: 0 4px 14px rgba(220, 38, 38, 0.18);
+}
+
+/* When a section is marked "All correct", dim the per-row review pills and
+   correction textareas inside it — reviewers don't need to tick each row.
+   The dimming is scoped by JS to the leaf section only, so a parent marked
+   correct never overrides a child's own verdict. */
+.editable-cell.verdict-dimmed { opacity: 0.45; }
+.editable-cell.verdict-dimmed .radio-group,
+.editable-cell.verdict-dimmed textarea,
+.editable-cell.verdict-dimmed input {
+    pointer-events: none;
+    filter: grayscale(0.5);
+}
+.editable-cell.verdict-dimmed::after {
+    content: "approved with section";
+    display: block;
+    font-size: 0.7rem;
+    color: var(--ok);
+    margin-top: 4px;
+    font-style: italic;
+}
+
+/* Subtle "completed" tint on the whole leaf section once a verdict is set. */
+details[data-verdict-state="correct"]   > summary { color: var(--ok); }
+details[data-verdict-state="incorrect"] > summary { color: var(--bad); }
+details[data-verdict-state="correct"]   > summary::after,
+details[data-verdict-state="incorrect"] > summary::after {
+    margin-left: 8px;
+    font-size: 0.8em;
+    font-weight: 500;
+}
+details[data-verdict-state="correct"]   > summary::after { content: "  ✓ approved"; color: var(--ok); }
+details[data-verdict-state="incorrect"] > summary::after { content: "  ✎ has corrections"; color: var(--bad); }
 
 /* --- Embassy notes block --- */
 .embassy-notes-block {
@@ -589,6 +851,109 @@ nav.table_of_contents a:hover {
     background: var(--brand-soft);
     text-decoration: none;
 }
+
+/* --- Custom sections (reviewer additions) --- */
+.custom-sections-area {
+    margin: 30px 0 20px;
+    padding: 24px;
+    border-radius: 14px;
+    background: linear-gradient(180deg, #ecfeff, #f0fdfa);
+    border: 1px dashed #0ea5e9;
+}
+.custom-sections-area h2 {
+    margin: 0 0 6px;
+    font-size: 1.35rem;
+    color: var(--brand);
+}
+.custom-sections-area .lead {
+    margin: 0 0 16px;
+    color: #0f766e;
+    font-size: 0.92rem;
+}
+#custom-sections-list { display: flex; flex-direction: column; gap: 14px; }
+#custom-sections-list:empty { display: none; }
+
+.custom-section {
+    background: white;
+    border: 1px solid #99f6e4;
+    border-radius: 12px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    box-shadow: var(--shadow);
+}
+.custom-section .row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+.custom-section input.cs-title {
+    flex: 1;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--brand);
+    padding: 10px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: #fdfdfd;
+    transition: border-color 120ms, box-shadow 200ms, font-size 200ms;
+}
+.custom-section input.cs-title:focus {
+    outline: none;
+    border-color: var(--brand);
+    box-shadow: 0 6px 22px rgba(12, 74, 110, 0.18);
+    font-size: 1.15rem;
+}
+.custom-section textarea.cs-body {
+    width: 100%;
+    min-height: 90px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 0.95rem;
+    color: var(--text);
+    background: #fdfdfd;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    resize: vertical;
+    transition: min-height 200ms, box-shadow 200ms, font-size 200ms;
+}
+.custom-section textarea.cs-body:focus {
+    outline: none;
+    border-color: var(--brand);
+    box-shadow: 0 8px 28px rgba(12, 74, 110, 0.18);
+    min-height: 200px;
+    font-size: 1rem;
+}
+.cs-remove {
+    appearance: none;
+    border: none;
+    background: #fee2e2;
+    color: #991b1b;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 120ms;
+}
+.cs-remove:hover { background: #fecaca; }
+#btn-add-section {
+    margin-top: 14px;
+    appearance: none;
+    border: none;
+    background: var(--brand);
+    color: white;
+    padding: 12px 20px;
+    border-radius: 999px;
+    font: inherit;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(12, 74, 110, 0.25);
+    transition: filter 120ms, transform 120ms;
+}
+#btn-add-section:hover { filter: brightness(1.08); transform: translateY(-1px); }
 
 /* --- Bottom action bar --- */
 .portal-actionbar {
@@ -695,6 +1060,15 @@ APPBAR_HTML = """
 </div>
 """
 
+CUSTOM_SECTIONS_HTML = """
+<section class="custom-sections-area" id="custom-sections-area">
+  <h2>📝 Additional sections</h2>
+  <p class="lead">Anything missing from the workbook above? Add a new section here — a new service, a new fee, a new procedure, or anything else the chatbot should know.</p>
+  <div id="custom-sections-list" aria-live="polite"></div>
+  <button type="button" id="btn-add-section">＋ Add new section</button>
+</section>
+"""
+
 ACTIONBAR_HTML = """
 <div class="portal-actionbar" role="toolbar" aria-label="Review actions">
   <button type="button" id="btn-save"     title="Save your progress to this browser">💾 Save draft</button>
@@ -709,7 +1083,7 @@ ACTIONBAR_HTML = """
 
 PORTAL_JS = r"""
 (function () {
-    const STORAGE_KEY = "embassy_review_portal_v1";
+    const STORAGE_KEY = "embassy_review_portal_v2";
     const saveStatusEl = document.getElementById("save-status");
     const progressFill = document.getElementById("progress-bar-fill");
     const progressLabel = document.getElementById("progress-label");
@@ -718,39 +1092,28 @@ PORTAL_JS = r"""
     let saveTimer = null;
     let lastSavedAt = null;
 
-    // ---- Field accessors ----
-    function allFieldElements() {
-        return Array.from(document.querySelectorAll(
-            '[data-field-name], input[name^="review_"]'
-        ));
-    }
-
-    function fieldKey(el) {
-        if (el.type === "radio") return el.name;
-        return el.dataset.fieldName || el.name || el.id;
-    }
-
+    // ---- State capture / restore ----
     function captureState() {
-        const state = {};
+        const state = { answers: {}, customSections: collectCustomSections() };
         document.querySelectorAll('input[type="radio"]').forEach(r => {
-            if (r.checked) state[r.name] = r.value;
+            if (r.checked) state.answers[r.name] = r.value;
         });
         document.querySelectorAll('input[type="checkbox"]').forEach(c => {
-            state[c.name] = c.checked;
+            if (c.checked) state.answers[c.name] = true;
         });
-        document.querySelectorAll('textarea').forEach(t => {
-            if (t.value.trim() !== "") state[t.name] = t.value;
+        document.querySelectorAll('textarea[name]').forEach(t => {
+            if (t.value.trim() !== "") state.answers[t.name] = t.value;
         });
-        document.querySelectorAll('input[type="url"]').forEach(t => {
-            if (t.value.trim() !== "") state[t.name] = t.value;
+        document.querySelectorAll('input[type="url"][name]').forEach(t => {
+            if (t.value.trim() !== "") state.answers[t.name] = t.value;
         });
         return state;
     }
 
     function applyState(state) {
         if (!state) return;
-        Object.entries(state).forEach(([key, value]) => {
-            // Radios
+        const answers = state.answers || state;  // back-compat with v1
+        Object.entries(answers).forEach(([key, value]) => {
             const radios = document.querySelectorAll(`input[type="radio"][name="${CSS.escape(key)}"]`);
             if (radios.length) {
                 radios.forEach(r => { r.checked = (r.value === value); });
@@ -767,6 +1130,9 @@ PORTAL_JS = r"""
                 }
             }
         });
+        if (Array.isArray(state.customSections)) {
+            state.customSections.forEach(cs => addCustomSection(cs.title, cs.body, /*persist*/false));
+        }
     }
 
     // ---- Save / load ----
@@ -808,34 +1174,50 @@ PORTAL_JS = r"""
         }
     }
 
-    // ---- Progress ----
-    function totalFieldGroups() {
-        const radioGroups = new Set();
-        document.querySelectorAll('input[type="radio"]').forEach(r => radioGroups.add(r.name));
-        const textareas = document.querySelectorAll('textarea').length;
-        const urls = document.querySelectorAll('input[type="url"]').length;
-        const checkboxes = document.querySelectorAll('input[type="checkbox"]').length;
-        return radioGroups.size + textareas + urls + checkboxes;
+    // ---- Section-level progress ----
+    function allSectionEls() {
+        return Array.from(document.querySelectorAll('details[data-section-id]'));
     }
 
-    function completedFieldGroups() {
-        let count = 0;
-        const seenRadios = new Set();
-        document.querySelectorAll('input[type="radio"]:checked').forEach(r => {
-            if (!seenRadios.has(r.name)) { seenRadios.add(r.name); count++; }
-        });
-        document.querySelectorAll('input[type="checkbox"]:checked').forEach(() => count++);
-        document.querySelectorAll('textarea').forEach(t => { if (t.value.trim()) count++; });
-        document.querySelectorAll('input[type="url"]').forEach(t => { if (t.value.trim()) count++; });
-        return count;
+    function sectionVerdict(detailsEl) {
+        // The verdict input that's a direct OWN child of this details (not in a nested section).
+        const verdictId = detailsEl.getAttribute('data-section-id');
+        if (!verdictId) return null;
+        const checked = detailsEl.querySelector(`input[type="radio"][name="${CSS.escape(verdictId)}"]:checked`);
+        return checked ? checked.value : null;
     }
 
     function updateProgress() {
-        const total = totalFieldGroups();
-        const done = completedFieldGroups();
+        const sections = allSectionEls();
+        const total = sections.length;
+        let done = 0;
+        sections.forEach(s => { if (sectionVerdict(s)) done++; });
         const pct = total === 0 ? 0 : Math.round((done / total) * 100);
         if (progressFill) progressFill.style.width = pct + "%";
-        if (progressLabel) progressLabel.textContent = `${pct}%  (${done}/${total} fields)`;
+        if (progressLabel) {
+            progressLabel.textContent = `${pct}%  (${done}/${total} sections)`;
+        }
+    }
+
+    // ---- Dim per-row controls when verdict = "all correct" ----
+    function applyVerdictStateToSection(detailsEl) {
+        const verdict = sectionVerdict(detailsEl);
+        if (verdict) detailsEl.setAttribute('data-verdict-state', verdict);
+        else detailsEl.removeAttribute('data-verdict-state');
+
+        // Scope: own editable cells only — never descend into nested
+        // sections, which carry their own verdict.
+        const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
+        const own = Array.from(detailsEl.querySelectorAll('.editable-cell'))
+            .filter(c => !nested.some(n => n.contains(c)));
+        own.forEach(c => {
+            if (verdict === 'correct') c.classList.add('verdict-dimmed');
+            else c.classList.remove('verdict-dimmed');
+        });
+    }
+
+    function refreshAllVerdictStates() {
+        allSectionEls().forEach(applyVerdictStateToSection);
     }
 
     // ---- Toast ----
@@ -852,47 +1234,40 @@ PORTAL_JS = r"""
         else el.classList.remove("filled");
     }
 
-    // ---- Build a human-readable summary for download ----
+    // ---- Build a structured report for download ----
     function buildReport() {
-        const state = captureState();
-        const report = { generatedAt: new Date().toISOString(), sections: [] };
-        // Walk top-level sections (h1 details under page-body)
-        document.querySelectorAll('.page-body > div > details').forEach(top => {
-            const section = collectSection(top);
-            if (section) report.sections.push(section);
+        const sections = allSectionEls().map(sec => {
+            const sum = sec.querySelector(":scope > summary");
+            const title = sec.getAttribute('data-section-label') ||
+                          (sum ? sum.textContent.trim() : "(untitled)");
+            const verdict = sectionVerdict(sec);
+            const items = collectFieldsLive(sec);
+            return { title, verdict: verdict || "unanswered", items };
         });
-        // Also include orphan editable fields (rare)
-        return report;
-    }
-
-    function collectSection(detailsEl) {
-        const sum = detailsEl.querySelector(":scope > summary");
-        const title = sum ? sum.textContent.trim() : "(untitled)";
-        const result = { title, subsections: [], items: collectFieldsLive(detailsEl) };
-        // Notion exports wrap nested details in :scope > div.indented (and sometimes another wrapper).
-        // Use the broader query so we still find direct child sub-sections regardless of wrapper depth.
-        const directNested = new Set();
-        detailsEl.querySelectorAll(":scope details").forEach(d => directNested.add(d));
-        detailsEl.querySelectorAll(":scope details details").forEach(d => directNested.delete(d));
-        directNested.forEach(d => {
-            const sub = collectSection(d);
-            if (sub) result.subsections.push(sub);
-        });
-        return result;
+        return {
+            generatedAt: new Date().toISOString(),
+            summary: {
+                totalSections: sections.length,
+                approved: sections.filter(s => s.verdict === "correct").length,
+                needsCorrections: sections.filter(s => s.verdict === "incorrect").length,
+                unanswered: sections.filter(s => s.verdict === "unanswered").length,
+            },
+            sections,
+            customSections: collectCustomSections(),
+        };
     }
 
     function collectFieldsLive(detailsEl) {
         const items = [];
-        // Fields belonging to nested <details> are reported by those sub-sections;
+        // Fields belonging to nested sections are reported by those subsections;
         // exclude them here to avoid double-counting.
-        const nestedFields = new Set();
-        detailsEl.querySelectorAll(":scope details *[name]").forEach(el => nestedFields.add(el));
-
-        function include(el) { return !nestedFields.has(el); }
+        const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
+        function include(el) { return !nested.some(n => n.contains(el)); }
 
         const seenRadios = new Set();
         detailsEl.querySelectorAll('input[type="radio"]:checked').forEach(r => {
             if (!include(r)) return;
+            if (r.dataset.verdict === "true") return;  // section verdict captured separately
             if (seenRadios.has(r.name)) return;
             seenRadios.add(r.name);
             const tr = r.closest('tr');
@@ -931,19 +1306,48 @@ PORTAL_JS = r"""
             }
             items.push({ type: "url", question: label || "Link", answer: v });
         });
-        detailsEl.querySelectorAll('input[type="checkbox"]:checked').forEach(c => {
-            if (!include(c)) return;
-            const lbl = c.closest('label');
-            const text = lbl ? lbl.textContent.trim() : "";
-            items.push({ type: "status", question: text, answer: "checked" });
-        });
         return items;
+    }
+
+    // ---- Custom sections ----
+    let customCounter = 0;
+    function addCustomSection(title, body, persist) {
+        customCounter++;
+        const list = document.getElementById('custom-sections-list');
+        const card = document.createElement('div');
+        card.className = 'custom-section';
+        card.dataset.csId = String(customCounter);
+        card.innerHTML = `
+            <div class="row">
+                <input type="text" class="cs-title" placeholder="New section title (e.g. 'Online appointment booking')">
+                <button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>
+            </div>
+            <textarea class="cs-body" placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…"></textarea>
+        `;
+        const titleInput = card.querySelector('.cs-title');
+        const bodyArea = card.querySelector('.cs-body');
+        if (title) titleInput.value = title;
+        if (body) bodyArea.value = body;
+        card.querySelector('.cs-remove').addEventListener('click', () => {
+            if (!confirm("Remove this custom section? Its content will be lost.")) return;
+            card.remove();
+            scheduleSave();
+        });
+        list.appendChild(card);
+        if (persist !== false) scheduleSave();
+        // Auto-focus the title for a new (empty) card so the reviewer can start typing.
+        if (persist !== false && !title) setTimeout(() => titleInput.focus(), 50);
+    }
+
+    function collectCustomSections() {
+        return Array.from(document.querySelectorAll('.custom-section')).map(card => ({
+            title: card.querySelector('.cs-title').value.trim(),
+            body: card.querySelector('.cs-body').value.trim(),
+        })).filter(cs => cs.title || cs.body);
     }
 
     function downloadJSON() {
         const report = buildReport();
-        // Also embed raw key/value answers in case the consumer wants them.
-        report.rawAnswers = captureState();
         const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -962,6 +1366,8 @@ PORTAL_JS = r"""
         document.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = false; });
         document.querySelectorAll('textarea').forEach(t => { t.value = ""; t.classList.remove("filled"); });
         document.querySelectorAll('input[type="url"]').forEach(t => { t.value = ""; t.classList.remove("filled"); });
+        document.querySelectorAll('.custom-section').forEach(c => c.remove());
+        refreshAllVerdictStates();
         updateProgress();
         saveStatusEl.textContent = "Draft cleared";
         saveStatusEl.classList.remove("saved");
@@ -976,15 +1382,21 @@ PORTAL_JS = r"""
     document.addEventListener("DOMContentLoaded", () => {
         load();
         document.querySelectorAll('textarea, input[type="url"]').forEach(markFilled);
+        refreshAllVerdictStates();
         updateProgress();
 
         document.body.addEventListener("input", (e) => {
             const t = e.target;
-            if (t.matches('textarea, input[type="url"]')) markFilled(t);
+            if (t.matches('textarea, input[type="url"], input[type="text"]')) markFilled(t);
             scheduleSave();
             updateProgress();
         });
         document.body.addEventListener("change", (e) => {
+            const t = e.target;
+            if (t && t.dataset && t.dataset.verdict === "true") {
+                const sec = t.closest('details[data-section-id]');
+                if (sec) applyVerdictStateToSection(sec);
+            }
             scheduleSave();
             updateProgress();
         });
@@ -995,6 +1407,7 @@ PORTAL_JS = r"""
         document.getElementById("btn-print").addEventListener("click", () => window.print());
         document.getElementById("btn-expand").addEventListener("click", () => expandAll(true));
         document.getElementById("btn-collapse").addEventListener("click", () => expandAll(false));
+        document.getElementById("btn-add-section").addEventListener("click", () => addCustomSection("", "", true));
     });
 })();
 """
@@ -1016,6 +1429,8 @@ def build() -> None:
     body = soup.body
     appbar = BeautifulSoup(APPBAR_HTML, "html.parser")
     body.insert(0, appbar)
+    custom_sections = BeautifulSoup(CUSTOM_SECTIONS_HTML, "html.parser")
+    body.append(custom_sections)
     actionbar = BeautifulSoup(ACTIONBAR_HTML, "html.parser")
     body.append(actionbar)
     script = soup.new_tag("script")
