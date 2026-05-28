@@ -1615,21 +1615,64 @@ PORTAL_JS = r"""
         }
     }
 
-    // ---- Dim per-row controls when verdict = "all correct" ----
+    // ---- Apply verdict state to a section ----
+    // When the reviewer picks "✅ All correct", we do TWO things:
+    //   (a) Visually dim every per-row editable cell in this section so
+    //       they read as "approved with the section" (CSS via the
+    //       .verdict-dimmed class).
+    //   (b) Programmatically tick the "✅ Correct" radio on every per-row
+    //       review group in the section, so the submitted report records
+    //       each row as explicitly approved instead of "unanswered".
+    //
+    // When the reviewer toggles away from "All correct" (to "Has
+    // corrections" or clears the verdict), we undo (a) and untick any
+    // radio that was auto-ticked, so they can re-mark rows manually.
+    // Manual selections made BEFORE clicking "All correct" are lost in
+    // that round-trip — that's intentional and matches the "bulk
+    // override" mental model.
+    //
+    // Scope: own (non-nested) editable cells / radios only. Nested
+    // sub-sections carry their own verdict and manage their own state.
     function applyVerdictStateToSection(detailsEl) {
         const verdict = sectionVerdict(detailsEl);
         if (verdict) detailsEl.setAttribute('data-verdict-state', verdict);
         else detailsEl.removeAttribute('data-verdict-state');
 
-        // Scope: own editable cells only — never descend into nested
-        // sections, which carry their own verdict.
         const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
-        const own = Array.from(detailsEl.querySelectorAll('.editable-cell'))
-            .filter(c => !nested.some(n => n.contains(c)));
-        own.forEach(c => {
-            if (verdict === 'correct') c.classList.add('verdict-dimmed');
-            else c.classList.remove('verdict-dimmed');
-        });
+        const isOwn = el => !nested.some(n => n.contains(el));
+
+        // (a) Visual dimming
+        Array.from(detailsEl.querySelectorAll('.editable-cell'))
+            .filter(isOwn)
+            .forEach(c => {
+                if (verdict === 'correct') c.classList.add('verdict-dimmed');
+                else c.classList.remove('verdict-dimmed');
+            });
+
+        // (b) Auto-tick / un-auto-tick the per-row "✅ Correct" radios.
+        // Filter to the actual review-pair radios — exclude the section
+        // verdict itself, exclude custom-option radios like
+        // "Same flow / Separate flow" (their values don't start with ✅),
+        // and never reach into nested sub-sections.
+        const ownReviewRadios = Array.from(detailsEl.querySelectorAll('input[type="radio"]'))
+            .filter(r => r.dataset.verdict !== 'true')
+            .filter(isOwn);
+
+        if (verdict === 'correct') {
+            ownReviewRadios
+                .filter(r => r.value && r.value.indexOf('✅') === 0)
+                .forEach(r => {
+                    r.checked = true;
+                    r.dataset.autoFromVerdict = 'true';
+                });
+        } else {
+            ownReviewRadios
+                .filter(r => r.dataset.autoFromVerdict === 'true')
+                .forEach(r => {
+                    r.checked = false;
+                    delete r.dataset.autoFromVerdict;
+                });
+        }
     }
 
     function refreshAllVerdictStates() {
