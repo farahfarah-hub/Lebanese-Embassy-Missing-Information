@@ -1199,57 +1199,6 @@ nav.table_of_contents a:hover {
     .status-checkbox { background: transparent; border-color: #999; }
 }
 
-/* --- PDF capture mode (Submit) ---------------------------------------------
-   When the Submit handler is rendering the page to PDF via html2canvas it
-   adds `.pdf-export-mode` to <body>. We:
-     * Hide all the chrome (app bar, action bar, toast, Add-section button,
-       per-section ✕ Remove buttons) so the PDF is pure content.
-     * Drop the sticky/fixed positioning so html2canvas captures the full
-       document flow correctly.
-     * Strip focus shadows from inputs and force textareas to render at
-       their natural content height (the JS sets style.height per element
-       just before capture so even unfocused textareas show every line).
-     * Hide the ▸ arrow markers next to <summary> — every section is
-       force-opened for the snapshot, so the arrows would look stale.
-   ------------------------------------------------------------------------ */
-body.pdf-export-mode {
-    padding: 0 !important;
-    max-width: none !important;
-    background: white !important;
-}
-body.pdf-export-mode .portal-appbar,
-body.pdf-export-mode .portal-actionbar,
-body.pdf-export-mode .portal-toast,
-body.pdf-export-mode #btn-add-section,
-body.pdf-export-mode .cs-remove {
-    display: none !important;
-}
-body.pdf-export-mode .page-body details,
-body.pdf-export-mode .page-body details details {
-    box-shadow: none !important;
-    page-break-inside: avoid;
-}
-body.pdf-export-mode details > summary::before { content: "" !important; margin: 0 !important; }
-
-body.pdf-export-mode textarea.review-textarea,
-body.pdf-export-mode .custom-section textarea.cs-body {
-    resize: none !important;
-    overflow: hidden !important;
-    min-height: 0 !important;
-    box-shadow: none !important;
-    background: #fdfdfd !important;
-}
-body.pdf-export-mode input.review-url,
-body.pdf-export-mode .custom-section input.cs-title {
-    box-shadow: none !important;
-    min-height: 0 !important;
-}
-/* Cancel the focus-expand transitions during capture — there is no focus,
-   but the previously-focused element can keep the inflated size otherwise. */
-body.pdf-export-mode textarea,
-body.pdf-export-mode input {
-    transition: none !important;
-}
 
 /* --- Small screens --- */
 @media (max-width: 720px) {
@@ -1291,7 +1240,7 @@ CUSTOM_SECTIONS_HTML = """
 ACTIONBAR_HTML = """
 <div class="portal-actionbar" role="toolbar" aria-label="Review actions">
   <button type="button" id="btn-save"     title="Save your progress to this browser">💾 Save draft</button>
-  <button type="button" id="btn-submit"   class="submit" title="Email the completed review (PDF + CSV + JSON) to the project owner">📤 Submit review</button>
+  <button type="button" id="btn-submit"   class="submit" title="Email a filled-in HTML snapshot of this review to the project owner">📤 Submit review</button>
   <button type="button" id="btn-download" title="Download a JSON file of all your answers">⬇️ Download (JSON)</button>
   <button type="button" id="btn-print"    title="Print or save as PDF locally">🖨️ Print / Save as PDF</button>
   <button type="button" id="btn-expand"   title="Expand every section">⊕ Expand all</button>
@@ -1307,21 +1256,20 @@ PORTAL_JS = r"""
 
     // ─── n8n webhook configuration ────────────────────────────────────────
     // Submit POSTs multipart/form-data here. The n8n workflow handles the
-    // email (with PDF / CSV / JSON attached) on its end.
+    // email on its end. The only attached file is a self-contained HTML
+    // snapshot of the workbook as the reviewer just filled it in — open
+    // it in any browser to see the live UI, frozen at submit time.
     //
     // IMPORTANT: the Webhook node in n8n must have **HTTP Method = POST**
     // (it defaults to GET). It also needs "Binary Data" enabled so the
-    // uploaded files are exposed as binary properties named `pdf`, `csv`,
-    // `json` for the email node to attach.
+    // uploaded file is exposed as binary property `html` for the email
+    // node to attach.
     //
     // Use the PRODUCTION path (`/webhook/`) once the workflow is Active.
     // While testing in the n8n editor click "Listen for test event" first
     // and swap to `/webhook-test/` — it accepts one POST per click.
     const N8N_WEBHOOK_URL =
         "https://farah-farah555.app.n8n.cloud/webhook/47bd183e-61f3-49c9-952a-728d85ad2551";
-
-    const JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
-    const HTML2CANVAS_URL = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
     const saveStatusEl = document.getElementById("save-status");
     const progressFill = document.getElementById("progress-bar-fill");
     const progressLabel = document.getElementById("progress-label");
@@ -1754,194 +1702,113 @@ PORTAL_JS = r"""
         }
         lines.push("");
         lines.push("─".repeat(70));
-        lines.push("The full review PDF is attached to this email.");
+        lines.push("A self-contained HTML snapshot of the full review is attached.");
+        lines.push("Open the .html file in any browser to see exactly what the reviewer");
+        lines.push("saw at submit time — every section, table, answer, and verdict.");
         return lines.join("\n");
     }
 
-    // ---- Lazy-load jsPDF + html2canvas from CDN ----
-    // The PDF is now a literal snapshot of the page as the reviewer sees
-    // it (same colors, same cards, same radio pills, same filled answers).
-    // jsPDF stitches the html2canvas output into A4 pages.
-    let _jsPDFPromise = null;
-    function loadJsPDF() {
-        if (_jsPDFPromise) return _jsPDFPromise;
-        _jsPDFPromise = (async () => {
-            await loadScript(JSPDF_URL);
-            const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
-            if (!ctor) throw new Error("jsPDF failed to load");
-            return ctor;
-        })();
-        return _jsPDFPromise;
-    }
-    let _h2cPromise = null;
-    function loadHtml2Canvas() {
-        if (_h2cPromise) return _h2cPromise;
-        _h2cPromise = (async () => {
-            if (window.html2canvas) return window.html2canvas;
-            await loadScript(HTML2CANVAS_URL);
-            if (!window.html2canvas) throw new Error("html2canvas failed to load");
-            return window.html2canvas;
-        })();
-        return _h2cPromise;
-    }
-    function loadScript(src) {
-        return new Promise((resolve, reject) => {
-            const s = document.createElement("script");
-            s.src = src; s.async = true;
-            s.onload = resolve;
-            s.onerror = () => reject(new Error("Failed to load " + src));
-            document.head.appendChild(s);
-        });
-    }
-
-    // ---- PDF builder (DOM snapshot of the page) ----
+    // ---- Filled-in HTML snapshot ----
     //
-    // Why per-chunk instead of one big html2canvas() over <body>:
-    // the workbook expands to ~30 000+ px when every <details> is opened,
-    // which exceeds the per-canvas pixel limits in Chrome/Safari
-    // (~32 767 px or ~268 MP). Rendering the page-body's children
-    // one-by-one keeps every intermediate canvas comfortably small and
-    // lets us paginate at logical chapter boundaries.
-    async function buildPDFBlob(report) {
-        const [JsPDF, html2canvas] = await Promise.all([loadJsPDF(), loadHtml2Canvas()]);
+    // Produces a single self-contained `.html` file that the reviewer can
+    // open in any browser to see the workbook EXACTLY as it looked at
+    // submit time: every section open, every typed-in answer in place,
+    // every selected radio highlighted, every section verdict marked.
+    //
+    // How form state is preserved through the clone:
+    //   * <textarea>foo</textarea>           — set .textContent from .value
+    //   * <input type="text|url" value="…">  — set the `value` attribute
+    //   * <input type="radio|checkbox" checked>
+    //                                        — toggle the `checked` attr
+    //   * <details open>                     — force open for everything,
+    //                                          so nothing is hidden
+    // The viewer can't actually edit the snapshot — inputs get `readonly`
+    // and choices get `disabled` so a stray click doesn't pretend it did
+    // something.
+    //
+    // We also strip the interactive chrome (app bar, action bar, toast,
+    // Add-section / ✕-Remove buttons, every <script>) so the file is a
+    // pure archive — no JS runs when you open it, no CDN fetches happen.
+    function buildFilledHtmlBlob(report) {
+        const docClone = document.documentElement.cloneNode(true);
 
-        // ── 1. Prepare the DOM for capture ───────────────────────────
-        // Force every <details> open, expand textareas to their scroll
-        // height, and switch <body> into pdf-export-mode (no app bar,
-        // no action bar, no focus rings).
-        const detailsState = [];
-        document.querySelectorAll('details').forEach(d => {
-            detailsState.push([d, d.open]);
-            d.open = true;
+        // querySelectorAll on document and on docClone both walk in document
+        // order, so the i-th live element corresponds to the i-th clone.
+        const liveFields  = document.querySelectorAll('input, textarea, select');
+        const cloneFields = docClone.querySelectorAll('input, textarea, select');
+        liveFields.forEach((live, i) => {
+            const clone = cloneFields[i];
+            if (!clone) return;
+            if (clone.tagName === 'TEXTAREA') {
+                clone.textContent = live.value || '';
+                // Pre-size the textarea so the recipient doesn't need to
+                // scroll inside each one. We add inline style on top of
+                // whatever the original had — !important would be safer
+                // but most of the existing CSS is non-important so plain
+                // style wins thanks to specificity.
+                const h = Math.max(live.scrollHeight, 38);
+                const existing = clone.getAttribute('style') || '';
+                clone.setAttribute('style',
+                    existing + ';height:' + h + 'px;min-height:0;resize:none;overflow:hidden;');
+                clone.setAttribute('readonly', 'readonly');
+            } else if (clone.type === 'checkbox' || clone.type === 'radio') {
+                if (live.checked) clone.setAttribute('checked', 'checked');
+                else clone.removeAttribute('checked');
+                clone.setAttribute('disabled', 'disabled');
+            } else {
+                clone.setAttribute('value', live.value || '');
+                clone.setAttribute('readonly', 'readonly');
+            }
         });
-        const fieldState = [];
-        document.querySelectorAll('textarea').forEach(t => {
-            fieldState.push([t, t.style.cssText]);
-            // Defocus + clear the focus-expand so the natural content
-            // height (scrollHeight) is accurate.
-            t.blur();
-            t.style.minHeight = '0';
-            t.style.height = 'auto';
-            t.style.height = Math.max(t.scrollHeight, 32) + 'px';
-            t.style.overflow = 'hidden';
+
+        // Force every <details> open so nothing is hidden in the archive.
+        docClone.querySelectorAll('details').forEach(d => d.setAttribute('open', 'open'));
+
+        // Strip interactive chrome + every <script>. The snapshot is static.
+        docClone.querySelectorAll(
+            '.portal-appbar, .portal-actionbar, .portal-toast, ' +
+            '#btn-add-section, .cs-remove, script'
+        ).forEach(n => n.remove());
+
+        // Empty custom-section cards (no title AND no body) just clutter
+        // the archive — drop them.
+        docClone.querySelectorAll('.custom-section').forEach(card => {
+            const t = card.querySelector('.cs-title');
+            const b = card.querySelector('.cs-body');
+            if ((!t || !t.value) && (!b || !b.value)) card.remove();
         });
-        document.querySelectorAll('input.review-url, input.cs-title').forEach(i => {
-            fieldState.push([i, i.style.cssText]);
-            i.blur();
-        });
-
-        document.body.classList.add('pdf-export-mode');
-        // Two RAFs ⇒ ensure the new styles + textarea heights have flushed.
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-
-        const cleanup = () => {
-            document.body.classList.remove('pdf-export-mode');
-            fieldState.forEach(([el, css]) => { el.style.cssText = css; });
-            detailsState.forEach(([el, open]) => { el.open = open; });
-        };
-
-        // ── 2. Pick the logical chunks to capture ────────────────────
-        // <article class="page"> > <header>            (page title)
-        // <article class="page"> > <div class="page-body"> > each child block
-        // <section id="custom-sections-area">          (reviewer-added)
-        function collectChunks() {
-            const out = [];
-            const article = document.querySelector('article.page');
-            if (article) {
-                Array.from(article.children).forEach(child => {
-                    if (!child.tagName) return;
-                    if (child.classList && child.classList.contains('page-body')) {
-                        Array.from(child.children).forEach(grand => {
-                            if (grand.tagName && grand.textContent.trim()) out.push(grand);
-                        });
-                    } else if (child.textContent.trim()) {
-                        out.push(child);
-                    }
-                });
-            }
-            const custom = document.getElementById('custom-sections-area');
-            if (custom && custom.textContent.trim() && !out.includes(custom)) out.push(custom);
-            return out;
-        }
-        const chunks = collectChunks();
-
-        // ── 3. Build the PDF, paginating chunk-by-chunk ──────────────
-        const doc = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
-        const pageW = doc.internal.pageSize.getWidth();
-        const pageH = doc.internal.pageSize.getHeight();
-        const margin = 8;
-        const usableW = pageW - margin * 2;
-        const usableH = pageH - margin * 2;
-        let cursorY = margin;
-        let hasContent = false;
-
-        async function addImageSlice(canvas, sliceTopPx, slicePx, drawMM) {
-            const slice = document.createElement('canvas');
-            slice.width = canvas.width;
-            slice.height = slicePx;
-            const ctx = slice.getContext('2d');
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, slice.width, slice.height);
-            ctx.drawImage(canvas, 0, -sliceTopPx);
-            doc.addImage(slice.toDataURL('image/jpeg', 0.85), 'JPEG',
-                margin, cursorY, usableW, drawMM);
+        // Hide the whole "Additional sections" area if no custom sections
+        // survived (the dashed-border box on its own looks empty/weird).
+        const customArea = docClone.querySelector('#custom-sections-area');
+        if (customArea && !customArea.querySelector('.custom-section')) {
+            customArea.remove();
         }
 
-        async function placeChunk(el) {
-            const canvas = await html2canvas(el, {
-                scale: 1.5,
-                useCORS: true,
-                backgroundColor: '#ffffff',
-                logging: false,
-                windowWidth: 1180,
-            });
-            const totalMM = canvas.height * usableW / canvas.width;
-            const pxPerMM = canvas.width / usableW;
-
-            if (totalMM <= usableH) {
-                if (hasContent && cursorY + totalMM > pageH - margin) {
-                    doc.addPage(); cursorY = margin;
-                }
-                await addImageSlice(canvas, 0, canvas.height, totalMM);
-                cursorY += totalMM + 2;
-                hasContent = true;
-                return;
-            }
-
-            // Tall chunk: paginate. Each slice starts on a fresh page.
-            let consumed = 0;
-            while (consumed < totalMM) {
-                if (hasContent) { doc.addPage(); cursorY = margin; }
-                const remainingMM = totalMM - consumed;
-                const sliceMM = Math.min(usableH, remainingMM);
-                const slicePx = Math.round(sliceMM * pxPerMM);
-                const topPx = Math.round(consumed * pxPerMM);
-                await addImageSlice(canvas, topPx, slicePx, sliceMM);
-                cursorY += sliceMM + 2;
-                hasContent = true;
-                consumed += sliceMM;
-            }
+        // Banner at the top with the submission timestamp + headline stats.
+        const body = docClone.querySelector('body');
+        if (body) {
+            const s = report.summary;
+            const banner = docClone.ownerDocument.createElement('div');
+            banner.setAttribute('style',
+                'background:linear-gradient(135deg,#0c4a6e,#0369a1);color:#fff;' +
+                'padding:18px 24px;margin:0 -24px 22px;border-radius:0 0 14px 14px;' +
+                'box-shadow:0 6px 18px rgba(12,74,110,0.25);font-family:-apple-system,' +
+                'BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;');
+            const stamp = new Date().toLocaleString();
+            banner.innerHTML =
+                '<div style="font-weight:700;font-size:1.05rem;">' +
+                '🇱🇧 Lebanese Embassy Review — submitted ' + stamp + '</div>' +
+                '<div style="margin-top:6px;font-size:0.85rem;font-weight:500;opacity:0.94;">' +
+                s.complete + ' / ' + s.totalSections + ' sections complete  ·  ' +
+                s.approved + ' approved  ·  ' + s.needsCorrections + ' with corrections  ·  ' +
+                (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + ' / ' +
+                s.requiredFieldsTotal + ' required fields filled' +
+                '</div>';
+            body.insertBefore(banner, body.firstChild);
         }
 
-        try {
-            for (const chunk of chunks) {
-                try { await placeChunk(chunk); }
-                catch (chunkErr) { console.warn("PDF chunk render failed:", chunkErr); }
-            }
-
-            // Footer with page numbers + a tiny submission timestamp.
-            const total = doc.internal.getNumberOfPages();
-            for (let i = 1; i <= total; i++) {
-                doc.setPage(i);
-                doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(150, 150, 150);
-                doc.text("Lebanese Embassy Review — submitted " + new Date().toLocaleString() +
-                    "  ·  page " + i + " of " + total,
-                    pageW / 2, pageH - 4, { align: "center" });
-            }
-            return doc.output("blob");
-        } finally {
-            cleanup();
-        }
+        const html = '<!doctype html>\n' + docClone.outerHTML;
+        return new Blob([html], { type: 'text/html;charset=utf-8' });
     }
 
     // ---- Submit ----
@@ -1991,27 +1858,12 @@ PORTAL_JS = r"""
         setSubmitState("loading");
         try {
             const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+            const baseName = "embassy_review_" + stamp;
 
-            // Generate the PDF first — it's the only artifact we ship now.
-            // CSV / JSON are still available via the separate "Download" button.
-            let pdfBlob = null;
-            let pdfError = null;
-            try {
-                pdfBlob = await buildPDFBlob(report);
-            } catch (pdfErr) {
-                pdfError = pdfErr;
-                console.warn("PDF generation failed:", pdfErr);
-            }
-            if (!pdfBlob) {
-                setSubmitState("error");
-                toast(
-                    "Couldn't generate the PDF (" + (pdfError && pdfError.message || "unknown") +
-                    "). Check your internet connection — jsPDF is loaded from a CDN on first use.",
-                    "error"
-                );
-                setTimeout(() => setSubmitState("idle"), 9000);
-                return;
-            }
+            // The one and only artifact: a self-contained HTML snapshot of
+            // the page exactly as the reviewer just filled it in. Generated
+            // synchronously off the live DOM — no CDN libraries, no network.
+            const htmlBlob = buildFilledHtmlBlob(report);
 
             const subject = "🇱🇧 Embassy Review submitted — " +
                 s.complete + "/" + s.totalSections + " sections complete";
@@ -2026,16 +1878,14 @@ PORTAL_JS = r"""
                 customSectionCount: report.customSections ? report.customSections.length : 0,
             };
 
-            // n8n's Webhook node exposes the uploaded file as binary.pdf for
-            // the email node to attach directly. Only the PDF goes to n8n —
-            // the CSV / JSON Download button is the path for those formats.
-            const baseName = "embassy_review_" + stamp;
+            // n8n's Webhook node exposes the uploaded file as binary.html for
+            // the email node to attach directly.
             const fd = new FormData();
             fd.append("subject", subject);
             fd.append("summary", summaryOneLine);
             fd.append("bodyText", bodyText);
             fd.append("meta", JSON.stringify(meta));
-            fd.append("pdf", new File([pdfBlob], baseName + ".pdf", { type: "application/pdf" }));
+            fd.append("html", new File([htmlBlob], baseName + ".html", { type: "text/html" }));
 
             let networkOk = false;
             let errorDetail = "";
@@ -2058,19 +1908,19 @@ PORTAL_JS = r"""
                 }
             }
 
-            // Local PDF backup, so the reviewer always has a copy regardless of
-            // whether the network send succeeded.
-            downloadBlob(pdfBlob, baseName + ".pdf");
+            // Local HTML backup, so the reviewer always has a copy regardless
+            // of whether the webhook send succeeded.
+            downloadBlob(htmlBlob, baseName + ".html");
 
             if (networkOk) {
-                setSubmitState("success", "✓ Sent! PDF saved locally too");
-                toast("Submitted to n8n — email on its way ✓  (PDF also downloaded)");
+                setSubmitState("success", "✓ Sent! HTML saved locally too");
+                toast("Submitted to n8n — email on its way ✓  (HTML also downloaded)");
                 setTimeout(() => setSubmitState("idle"), 6000);
             } else {
                 setSubmitState("error");
                 toast(
                     "Webhook send failed (" + errorDetail +
-                    ") — but your PDF was downloaded. You can email it manually.",
+                    ") — but your HTML was downloaded. You can email it manually.",
                     "error"
                 );
                 console.error("n8n submit failed:", errorDetail);
