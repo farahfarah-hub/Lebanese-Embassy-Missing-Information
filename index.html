@@ -1383,6 +1383,37 @@ nav.table_of_contents a:hover {
 .portal-actionbar button.primary:hover { transform: translateY(-1px); filter: brightness(1.05); }
 .portal-actionbar button.danger:hover { background: #b91c1c; }
 
+.portal-actionbar button.submit {
+    background: linear-gradient(135deg, #16a34a, #15803d);
+    color: white;
+    font-weight: 700;
+    padding: 10px 18px;
+    box-shadow: 0 4px 14px rgba(22, 163, 74, 0.35);
+}
+.portal-actionbar button.submit:hover { transform: translateY(-1px); filter: brightness(1.08); }
+.portal-actionbar button.submit[disabled] {
+    opacity: 0.7;
+    cursor: progress;
+    filter: grayscale(0.2);
+}
+.portal-actionbar button.submit.success {
+    background: linear-gradient(135deg, #0ea5e9, #0369a1);
+}
+.portal-actionbar button.submit.error {
+    background: linear-gradient(135deg, #dc2626, #991b1b);
+}
+.portal-actionbar button.submit .spin {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid rgba(255,255,255,0.4);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: portal-spin 800ms linear infinite;
+    margin-right: 4px;
+    vertical-align: -2px;
+}
+@keyframes portal-spin { to { transform: rotate(360deg); } }
+
 /* --- Toast --- */
 .portal-toast {
     position: fixed;
@@ -1588,8 +1619,9 @@ nav.table_of_contents a:hover {
 
 <div aria-label="Review actions" class="portal-actionbar" role="toolbar">
 <button id="btn-save" title="Save your progress to this browser" type="button">💾 Save draft</button>
-<button class="primary" id="btn-download" title="Download a JSON file of all your answers" type="button">⬇️ Download answers (JSON)</button>
-<button id="btn-print" title="Print or save as PDF" type="button">🖨️ Print / Save as PDF</button>
+<button class="submit" id="btn-submit" title="Email the completed review (PDF + CSV + JSON) to the project owner" type="button">📤 Submit review</button>
+<button id="btn-download" title="Download a JSON file of all your answers" type="button">⬇️ Download (JSON)</button>
+<button id="btn-print" title="Print or save as PDF locally" type="button">🖨️ Print / Save as PDF</button>
 <button id="btn-expand" title="Expand every section" type="button">⊕ Expand all</button>
 <button id="btn-collapse" title="Collapse every section" type="button">⊖ Collapse all</button>
 <button class="danger" id="btn-clear" title="Delete your saved draft from this browser" type="button">🗑️ Clear draft</button>
@@ -1598,6 +1630,9 @@ nav.table_of_contents a:hover {
 <script>
 (function () {
     const STORAGE_KEY = "embassy_review_portal_v2";
+    const FORMSPREE_ENDPOINT = "https://formspree.io/f/meednajz";
+    const JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
+    const AUTOTABLE_URL = "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js";
     const saveStatusEl = document.getElementById("save-status");
     const progressFill = document.getElementById("progress-bar-fill");
     const progressLabel = document.getElementById("progress-label");
@@ -1949,6 +1984,321 @@ nav.table_of_contents a:hover {
         document.querySelectorAll('details').forEach(d => { d.open = open; });
     }
 
+    // ---- CSV builder ----
+    function csvEscape(v) {
+        const s = (v === null || v === undefined) ? "" : String(v);
+        if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+        return s;
+    }
+    function buildCSV(report) {
+        const rows = [["Section", "Verdict", "Required field?", "Question", "Answer"]];
+        report.sections.forEach(sec => {
+            if (!sec.items.length) {
+                rows.push([sec.title, sec.verdict, "", "", ""]);
+                return;
+            }
+            sec.items.forEach(item => {
+                rows.push([
+                    sec.title,
+                    sec.verdict,
+                    item.required ? "yes" : "",
+                    item.question,
+                    item.answer,
+                ]);
+            });
+        });
+        if (report.customSections && report.customSections.length) {
+            report.customSections.forEach(cs => {
+                rows.push(["(custom) " + (cs.title || "(untitled)"), "", "", "", cs.body || ""]);
+            });
+        }
+        return rows.map(r => r.map(csvEscape).join(",")).join("\r\n");
+    }
+
+    // ---- Email body (plain text — Formspree shows this in the email) ----
+    function buildEmailBody(report) {
+        const s = report.summary;
+        const lines = [];
+        lines.push("LEBANESE EMBASSY REVIEW — submitted " + new Date().toLocaleString());
+        lines.push("=".repeat(70));
+        lines.push("");
+        lines.push("SUMMARY");
+        lines.push("  Sections complete:      " + s.complete + " / " + s.totalSections);
+        lines.push("  ✓ Approved as-is:       " + s.approved);
+        lines.push("  ✎ Has corrections:      " + s.needsCorrections);
+        lines.push("  ○ Not yet reviewed:     " + s.unanswered);
+        lines.push("  Required fields filled: " +
+            (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + " / " + s.requiredFieldsTotal);
+        lines.push("");
+        lines.push("─".repeat(70));
+        lines.push("SECTION DETAILS");
+        lines.push("─".repeat(70));
+        report.sections.forEach(sec => {
+            lines.push("");
+            lines.push("## " + sec.title);
+            const verdictLabel = ({
+                "correct": "✓ All correct (no edits)",
+                "incorrect": "✎ Has corrections / answers below",
+                "unanswered": "○ Not yet reviewed",
+            })[sec.verdict] || sec.verdict;
+            lines.push("Status: " + verdictLabel);
+            if (sec.requiredFields > 0) {
+                lines.push("Required fields: " +
+                    (sec.requiredFields - sec.requiredFieldsUnfilled) + " / " + sec.requiredFields + " filled");
+            }
+            sec.items.forEach(item => {
+                lines.push("  • " + item.question + (item.required ? "  [REQUIRED]" : "") + ":");
+                String(item.answer).split("\n").forEach(l => lines.push("      " + l));
+            });
+            if (!sec.items.length) lines.push("  (no answers entered)");
+        });
+        if (report.customSections && report.customSections.length) {
+            lines.push("");
+            lines.push("─".repeat(70));
+            lines.push("ADDITIONAL SECTIONS (added by the reviewer)");
+            lines.push("─".repeat(70));
+            report.customSections.forEach(cs => {
+                lines.push("");
+                lines.push("## " + (cs.title || "(untitled)"));
+                String(cs.body || "").split("\n").forEach(l => lines.push(l));
+            });
+        }
+        lines.push("");
+        lines.push("─".repeat(70));
+        lines.push("Full data also attached as: review.csv · review.pdf · review.json");
+        return lines.join("\n");
+    }
+
+    // ---- Lazy-load jsPDF + autoTable from CDN ----
+    let _jsPDFPromise = null;
+    function loadJsPDF() {
+        if (_jsPDFPromise) return _jsPDFPromise;
+        _jsPDFPromise = (async () => {
+            await loadScript(JSPDF_URL);
+            await loadScript(AUTOTABLE_URL);
+            const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+            if (!ctor) throw new Error("jsPDF failed to load");
+            return ctor;
+        })();
+        return _jsPDFPromise;
+    }
+    function loadScript(src) {
+        return new Promise((resolve, reject) => {
+            const s = document.createElement("script");
+            s.src = src; s.async = true;
+            s.onload = resolve;
+            s.onerror = () => reject(new Error("Failed to load " + src));
+            document.head.appendChild(s);
+        });
+    }
+
+    // ---- PDF builder ----
+    async function buildPDFBlob(report) {
+        const JsPDF = await loadJsPDF();
+        const doc = new JsPDF({ unit: "mm", format: "a4" });
+        const pageW = doc.internal.pageSize.getWidth();
+        const margin = 14;
+        let y = 18;
+
+        doc.setFont("helvetica", "bold").setFontSize(18).setTextColor(12, 74, 110);
+        doc.text("Lebanese Embassy Review", margin, y);
+        y += 7;
+        doc.setFont("helvetica", "normal").setFontSize(10).setTextColor(80, 80, 80);
+        doc.text("Submitted " + new Date().toLocaleString(), margin, y); y += 8;
+
+        const s = report.summary;
+        doc.setFontSize(10).setTextColor(30, 30, 30);
+        const summaryLines = [
+            "Sections complete: " + s.complete + " / " + s.totalSections +
+                "   (Approved: " + s.approved +
+                "   Has corrections: " + s.needsCorrections +
+                "   Unanswered: " + s.unanswered + ")",
+            "Required fields filled: " +
+                (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + " / " + s.requiredFieldsTotal,
+        ];
+        summaryLines.forEach(l => { doc.text(l, margin, y); y += 5; });
+        y += 4;
+
+        const verdictColor = {
+            "correct":    [22, 163, 74],
+            "incorrect":  [220, 38, 38],
+            "unanswered": [148, 163, 184],
+        };
+        const verdictLabel = {
+            "correct": "Approved",
+            "incorrect": "Has corrections",
+            "unanswered": "Not reviewed",
+        };
+
+        report.sections.forEach(sec => {
+            if (y > 270) { doc.addPage(); y = 18; }
+            doc.setFont("helvetica", "bold").setFontSize(12).setTextColor(12, 74, 110);
+            const titleLines = doc.splitTextToSize(sec.title, pageW - margin * 2);
+            doc.text(titleLines, margin, y); y += titleLines.length * 5;
+
+            const vc = verdictColor[sec.verdict] || [80, 80, 80];
+            doc.setFont("helvetica", "bold").setFontSize(9).setTextColor(vc[0], vc[1], vc[2]);
+            doc.text(verdictLabel[sec.verdict] || sec.verdict, margin, y); y += 5;
+
+            if (sec.requiredFields > 0) {
+                doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(180, 83, 9);
+                doc.text("Required: " + (sec.requiredFields - sec.requiredFieldsUnfilled) +
+                    " / " + sec.requiredFields + " filled", margin, y); y += 4;
+            }
+            y += 1;
+
+            if (sec.items.length) {
+                doc.autoTable({
+                    startY: y,
+                    head: [["Question / field", "Answer", ""]],
+                    body: sec.items.map(it => [
+                        it.question || "",
+                        String(it.answer || ""),
+                        it.required ? "REQ" : "",
+                    ]),
+                    styles: { fontSize: 8, cellPadding: 2, valign: "top", textColor: [40, 40, 40] },
+                    headStyles: { fillColor: [12, 74, 110], textColor: 255, fontSize: 8.5 },
+                    columnStyles: {
+                        0: { cellWidth: 65 },
+                        1: { cellWidth: "auto" },
+                        2: { cellWidth: 12, halign: "center", textColor: [180, 83, 9], fontStyle: "bold" },
+                    },
+                    margin: { left: margin, right: margin },
+                });
+                y = doc.lastAutoTable.finalY + 6;
+            } else {
+                doc.setFont("helvetica", "italic").setFontSize(9).setTextColor(120, 120, 120);
+                doc.text("(no entries)", margin, y); y += 6;
+            }
+        });
+
+        if (report.customSections && report.customSections.length) {
+            doc.addPage();
+            y = 18;
+            doc.setFont("helvetica", "bold").setFontSize(16).setTextColor(12, 74, 110);
+            doc.text("Additional sections", margin, y); y += 8;
+            doc.setFont("helvetica", "normal").setFontSize(9).setTextColor(80, 80, 80);
+            doc.text("Custom sections added by the reviewer.", margin, y); y += 8;
+
+            report.customSections.forEach(cs => {
+                if (y > 260) { doc.addPage(); y = 18; }
+                doc.setFont("helvetica", "bold").setFontSize(12).setTextColor(12, 74, 110);
+                doc.text(cs.title || "(untitled)", margin, y); y += 6;
+                doc.setFont("helvetica", "normal").setFontSize(10).setTextColor(40, 40, 40);
+                const lines = doc.splitTextToSize(cs.body || "", pageW - margin * 2);
+                doc.text(lines, margin, y); y += lines.length * 5 + 6;
+            });
+        }
+
+        const total = doc.internal.getNumberOfPages();
+        for (let i = 1; i <= total; i++) {
+            doc.setPage(i);
+            doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(150, 150, 150);
+            doc.text("Lebanese Embassy Review — page " + i + " of " + total,
+                pageW / 2, doc.internal.pageSize.getHeight() - 8, { align: "center" });
+        }
+        return doc.output("blob");
+    }
+
+    // ---- Submit ----
+    function setSubmitState(state, label) {
+        const btn = document.getElementById("btn-submit");
+        if (!btn) return;
+        btn.classList.remove("success", "error");
+        btn.disabled = (state === "loading");
+        if (state === "loading") {
+            btn.innerHTML = '<span class="spin"></span>' + (label || "Submitting…");
+        } else if (state === "success") {
+            btn.classList.add("success");
+            btn.textContent = label || "✓ Submitted";
+        } else if (state === "error") {
+            btn.classList.add("error");
+            btn.textContent = label || "✗ Failed — click to retry";
+        } else {
+            btn.textContent = label || "📤 Submit review";
+        }
+    }
+
+    async function submitReview() {
+        const report = buildReport();
+        const s = report.summary;
+        const unfilledReq = s.requiredFieldsUnfilled;
+        const unanswered = s.unanswered;
+
+        const warnings = [];
+        if (unfilledReq > 0) warnings.push(unfilledReq + " required field" + (unfilledReq === 1 ? "" : "s") + " still empty");
+        if (unanswered > 0) warnings.push(unanswered + " section" + (unanswered === 1 ? "" : "s") + " not yet reviewed");
+        if (warnings.length) {
+            const ok = confirm(
+                "You still have:\n  • " + warnings.join("\n  • ") +
+                "\n\nSubmit anyway?  (You can always submit again later — the latest one wins.)"
+            );
+            if (!ok) return;
+        }
+
+        setSubmitState("loading");
+        try {
+            const csv = buildCSV(report);
+            const emailBody = buildEmailBody(report);
+            const json = JSON.stringify(report, null, 2);
+            const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+
+            let pdfBlob = null;
+            try {
+                pdfBlob = await buildPDFBlob(report);
+            } catch (pdfErr) {
+                console.warn("PDF generation failed; submitting without PDF:", pdfErr);
+            }
+
+            const fd = new FormData();
+            fd.append("_subject", "🇱🇧 Embassy Review submitted — " +
+                s.complete + "/" + s.totalSections + " sections complete");
+            fd.append("Submitted at", new Date().toLocaleString());
+            fd.append("Sections complete", s.complete + " / " + s.totalSections);
+            fd.append("Approved", String(s.approved));
+            fd.append("Has corrections", String(s.needsCorrections));
+            fd.append("Not yet reviewed", String(s.unanswered));
+            fd.append("Required fields filled",
+                (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + " / " + s.requiredFieldsTotal);
+            fd.append("message", emailBody);  // shown as the email body by Formspree
+            fd.append("review_csv", new File([csv], "embassy_review_" + stamp + ".csv",
+                { type: "text/csv" }));
+            fd.append("review_json", new File([json], "embassy_review_" + stamp + ".json",
+                { type: "application/json" }));
+            if (pdfBlob) {
+                fd.append("review_pdf", new File([pdfBlob], "embassy_review_" + stamp + ".pdf",
+                    { type: "application/pdf" }));
+            }
+            fd.append("_gotcha", "");  // honeypot — Formspree will silently drop bots
+
+            const resp = await fetch(FORMSPREE_ENDPOINT, {
+                method: "POST",
+                body: fd,
+                headers: { Accept: "application/json" },
+            });
+
+            if (resp.ok) {
+                setSubmitState("success", "✓ Sent! Check the inbox");
+                toast("Submitted — email is on its way ✓");
+                setTimeout(() => setSubmitState("idle"), 5000);
+            } else {
+                let detail = "";
+                try {
+                    const j = await resp.json();
+                    detail = (j.errors && j.errors.map(e => e.message).join("; ")) || j.error || "";
+                } catch (_) {}
+                setSubmitState("error");
+                toast("Submit failed: " + (detail || resp.statusText || "unknown error"), "error");
+                setTimeout(() => setSubmitState("idle"), 6000);
+            }
+        } catch (err) {
+            console.error(err);
+            setSubmitState("error");
+            toast("Submit failed: " + (err.message || err), "error");
+            setTimeout(() => setSubmitState("idle"), 6000);
+        }
+    }
+
     // ---- Wire up ----
     document.addEventListener("DOMContentLoaded", () => {
         load();
@@ -1980,6 +2330,7 @@ nav.table_of_contents a:hover {
         });
 
         document.getElementById("btn-save").addEventListener("click", () => { save(); toast("Saved"); });
+        document.getElementById("btn-submit").addEventListener("click", submitReview);
         document.getElementById("btn-clear").addEventListener("click", clearDraft);
         document.getElementById("btn-download").addEventListener("click", downloadJSON);
         document.getElementById("btn-print").addEventListener("click", () => window.print());
