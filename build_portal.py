@@ -1252,7 +1252,23 @@ ACTIONBAR_HTML = """
 PORTAL_JS = r"""
 (function () {
     const STORAGE_KEY = "embassy_review_portal_v2";
-    const FORMSPREE_ENDPOINT = "https://formspree.io/f/meednajz";
+
+    // ─── n8n webhook configuration ────────────────────────────────────────
+    // Submit POSTs multipart/form-data here. The n8n workflow handles the
+    // email (with PDF / CSV / JSON attached) on its end.
+    //
+    // To finish setup: replace the BASE URL below with your real n8n host.
+    // For n8n Cloud the pattern is:    https://<workspace>.app.n8n.cloud
+    // For self-hosted instances:       https://n8n.yourdomain.com
+    // The webhook path 47bd183e-...    is hard-wired to your Webhook node.
+    //
+    // Use the PRODUCTION path (`/webhook/`) once your workflow is
+    // activated. While you're still building it in the n8n editor, swap
+    // to the test path (`/webhook-test/`) — it only listens for one POST
+    // per click on "Listen for test event".
+    const N8N_WEBHOOK_URL =
+        "https://REPLACE-ME.app.n8n.cloud/webhook/47bd183e-61f3-49c9-952a-728d85ad2551";
+
     const JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
     const AUTOTABLE_URL = "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js";
     const saveStatusEl = document.getElementById("save-status");
@@ -1687,9 +1703,7 @@ PORTAL_JS = r"""
         }
         lines.push("");
         lines.push("─".repeat(70));
-        lines.push("Raw CSV is included below this summary; the reviewer also");
-        lines.push("downloaded matching .csv, .pdf and .json files locally and");
-        lines.push("can send them as attachments on request.");
+        lines.push("PDF / CSV / JSON of this review are attached to this email.");
         return lines.join("\n");
     }
 
@@ -1874,9 +1888,9 @@ PORTAL_JS = r"""
             const json = JSON.stringify(report, null, 2);
             const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
 
-            // Build PDF up-front so the reviewer always gets a local copy even
-            // if the network send fails. PDF generation may fail (CDN blocked,
-            // offline) — that's OK, we still ship CSV + JSON.
+            // Build PDF up-front so the reviewer always gets a local copy
+            // even if the network send fails. PDF generation may fail (CDN
+            // blocked, offline) — that's OK, we still ship CSV + JSON.
             let pdfBlob = null;
             try {
                 pdfBlob = await buildPDFBlob(report);
@@ -1884,59 +1898,74 @@ PORTAL_JS = r"""
                 console.warn("PDF generation failed:", pdfErr);
             }
 
-            // Email body bundles the readable report + the raw CSV between
-            // markers so the recipient (you) can copy/paste straight into a
-            // spreadsheet. Formspree free tier blocks file uploads, so we
-            // can't attach the CSV/PDF/JSON — but the reviewer's browser
-            // will auto-download them as a backup after a successful send.
-            const emailBody = buildEmailBody(report) +
-                "\n\n" + "=".repeat(70) +
-                "\nCSV DATA (copy everything between the BEGIN/END markers and save as .csv)" +
-                "\n" + "=".repeat(70) +
-                "\n----- BEGIN CSV -----\n" + csv + "\n----- END CSV -----\n";
+            const subject = "🇱🇧 Embassy Review submitted — " +
+                s.complete + "/" + s.totalSections + " sections complete";
+            const summaryOneLine =
+                s.complete + "/" + s.totalSections + " sections complete · " +
+                s.approved + " approved · " + s.needsCorrections + " with corrections · " +
+                (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + "/" + s.requiredFieldsTotal + " required filled";
+            const bodyText = buildEmailBody(report);
+            const meta = {
+                submittedAt: new Date().toISOString(),
+                stats: s,
+                customSectionCount: report.customSections ? report.customSections.length : 0,
+            };
 
-            const fd = new FormData();
-            fd.append("_subject", "🇱🇧 Embassy Review submitted — " +
-                s.complete + "/" + s.totalSections + " sections complete");
-            fd.append("Submitted at", new Date().toLocaleString());
-            fd.append("Sections complete", s.complete + " / " + s.totalSections);
-            fd.append("Approved as-is", String(s.approved));
-            fd.append("Has corrections", String(s.needsCorrections));
-            fd.append("Not yet reviewed", String(s.unanswered));
-            fd.append("Required fields filled",
-                (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + " / " + s.requiredFieldsTotal);
-            fd.append("message", emailBody);
-            fd.append("_gotcha", "");
-
-            const resp = await fetch(FORMSPREE_ENDPOINT, {
-                method: "POST",
-                body: fd,
-                headers: { Accept: "application/json" },
-            });
-
-            // Always offer the local backup files. Whether the network call
-            // succeeded or not, the reviewer has a tangible copy in hand.
+            // n8n's Webhook node natively understands multipart/form-data;
+            // each file field shows up as a `binary` property the email
+            // node can attach directly.
             const baseName = "embassy_review_" + stamp;
+            const fd = new FormData();
+            fd.append("subject", subject);
+            fd.append("summary", summaryOneLine);
+            fd.append("bodyText", bodyText);
+            fd.append("meta", JSON.stringify(meta));
+            fd.append("csv",  new File([csv],  baseName + ".csv",  { type: "text/csv" }));
+            fd.append("json", new File([json], baseName + ".json", { type: "application/json" }));
+            if (pdfBlob) {
+                fd.append("pdf", new File([pdfBlob], baseName + ".pdf", { type: "application/pdf" }));
+            }
+
+            let networkOk = false;
+            let errorDetail = "";
+
+            // Guard against the obvious "user forgot to fill in the URL" case.
+            if (N8N_WEBHOOK_URL.includes("REPLACE-ME")) {
+                errorDetail = "n8n webhook URL not configured yet — see N8N_WEBHOOK_URL in the page source";
+            } else {
+                try {
+                    const resp = await fetch(N8N_WEBHOOK_URL, { method: "POST", body: fd });
+                    networkOk = resp.ok;
+                    if (!resp.ok) {
+                        const text = await resp.text().catch(() => "");
+                        // n8n's most common errors:
+                        //   404 + "not registered" → workflow not active, or wrong path
+                        //   500 → workflow error inside n8n
+                        errorDetail = "HTTP " + resp.status + " " + (text.slice(0, 240) || resp.statusText);
+                    }
+                } catch (netErr) {
+                    errorDetail = netErr.message || String(netErr);
+                }
+            }
+
+            // Always offer the local backup files. Whether the webhook
+            // call succeeded or not, the reviewer has a tangible copy.
             downloadBlob(new Blob([csv],  { type: "text/csv" }),         baseName + ".csv");
             downloadBlob(new Blob([json], { type: "application/json" }), baseName + ".json");
-            if (pdfBlob) downloadBlob(pdfBlob,                            baseName + ".pdf");
+            if (pdfBlob) downloadBlob(pdfBlob, baseName + ".pdf");
 
-            if (resp.ok) {
+            if (networkOk) {
                 setSubmitState("success", "✓ Sent! Files saved locally too");
-                toast("Submitted — email on its way ✓  (CSV/PDF/JSON also downloaded)");
+                toast("Submitted to n8n — email on its way ✓  (CSV/PDF/JSON also downloaded)");
                 setTimeout(() => setSubmitState("idle"), 6000);
             } else {
-                let detail = "";
-                try {
-                    const j = await resp.json();
-                    detail = (j.errors && j.errors.map(e => e.message).join("; ")) || j.error || "";
-                } catch (_) {}
                 setSubmitState("error");
                 toast(
-                    "Email send failed (" + (detail || resp.statusText) +
+                    "Webhook send failed (" + errorDetail +
                     ") — but your CSV/PDF/JSON were downloaded. You can email them manually.",
                     "error"
                 );
+                console.error("n8n submit failed:", errorDetail);
                 setTimeout(() => setSubmitState("idle"), 9000);
             }
         } catch (err) {
