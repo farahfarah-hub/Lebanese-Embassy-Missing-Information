@@ -1633,18 +1633,14 @@ nav.table_of_contents a:hover {
     const STORAGE_KEY = "embassy_review_portal_v2";
 
     // ─── n8n webhook configuration ────────────────────────────────────────
-    // Submit POSTs multipart/form-data here. The n8n workflow handles the
-    // email on its end. The only attached file is a self-contained HTML
-    // snapshot of the workbook as the reviewer just filled it in — open
-    // it in any browser to see the live UI, frozen at submit time.
-    //
-    // IMPORTANT: the Webhook node in n8n must have **HTTP Method = POST**
-    // (it defaults to GET). It also needs "Binary Data" enabled so the
-    // uploaded file is exposed as the binary property `pdf` for the
-    // email node to attach (we kept the property name `pdf` for backward
-    // compatibility with the existing n8n workflow even though the file
-    // itself is now `.html`; the email recipient sees the real .html
-    // extension because that's the multipart filename).
+    // Submit POSTs multipart/form-data here. The browser ships a single
+    // self-contained HTML snapshot of the workbook as the reviewer just
+    // filled it in. The n8n workflow is expected to:
+    //   1. Receive it on this webhook (HTTP Method = POST, Binary Data
+    //      enabled — the file shows up as `binary.html`).
+    //   2. Run an HTML→PDF conversion node (e.g. "Convert to File", or
+    //      any html-pdf node) on `binary.html`.
+    //   3. Attach the resulting PDF to the email and send it.
     //
     // Use the PRODUCTION path (`/webhook/`) once the workflow is Active.
     // While testing in the n8n editor click "Listen for test event" first
@@ -2259,17 +2255,15 @@ nav.table_of_contents a:hover {
                 customSectionCount: report.customSections ? report.customSections.length : 0,
             };
 
-            // n8n's Webhook node exposes the uploaded file as binary.pdf
-            // for the email node to attach. (Name kept as `pdf` to match
-            // the existing n8n workflow — the file itself is .html, and
-            // the email recipient sees `embassy_review_…html` because the
-            // multipart filename carries the real extension.)
+            // n8n's Webhook node exposes the uploaded file as binary.html.
+            // The downstream HTML→PDF node consumes that and produces
+            // binary.pdf for the email attachment.
             const fd = new FormData();
             fd.append("subject", subject);
             fd.append("summary", summaryOneLine);
             fd.append("bodyText", bodyText);
             fd.append("meta", JSON.stringify(meta));
-            fd.append("pdf", new File([htmlBlob], baseName + ".html", { type: "text/html" }));
+            fd.append("html", new File([htmlBlob], baseName + ".html", { type: "text/html" }));
 
             let networkOk = false;
             let errorDetail = "";
