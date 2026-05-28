@@ -1450,6 +1450,58 @@ nav.table_of_contents a:hover {
     .status-checkbox { background: transparent; border-color: #999; }
 }
 
+/* --- PDF capture mode (Submit) ---------------------------------------------
+   When the Submit handler is rendering the page to PDF via html2canvas it
+   adds `.pdf-export-mode` to <body>. We:
+     * Hide all the chrome (app bar, action bar, toast, Add-section button,
+       per-section ✕ Remove buttons) so the PDF is pure content.
+     * Drop the sticky/fixed positioning so html2canvas captures the full
+       document flow correctly.
+     * Strip focus shadows from inputs and force textareas to render at
+       their natural content height (the JS sets style.height per element
+       just before capture so even unfocused textareas show every line).
+     * Hide the ▸ arrow markers next to <summary> — every section is
+       force-opened for the snapshot, so the arrows would look stale.
+   ------------------------------------------------------------------------ */
+body.pdf-export-mode {
+    padding: 0 !important;
+    max-width: none !important;
+    background: white !important;
+}
+body.pdf-export-mode .portal-appbar,
+body.pdf-export-mode .portal-actionbar,
+body.pdf-export-mode .portal-toast,
+body.pdf-export-mode #btn-add-section,
+body.pdf-export-mode .cs-remove {
+    display: none !important;
+}
+body.pdf-export-mode .page-body details,
+body.pdf-export-mode .page-body details details {
+    box-shadow: none !important;
+    page-break-inside: avoid;
+}
+body.pdf-export-mode details > summary::before { content: "" !important; margin: 0 !important; }
+
+body.pdf-export-mode textarea.review-textarea,
+body.pdf-export-mode .custom-section textarea.cs-body {
+    resize: none !important;
+    overflow: hidden !important;
+    min-height: 0 !important;
+    box-shadow: none !important;
+    background: #fdfdfd !important;
+}
+body.pdf-export-mode input.review-url,
+body.pdf-export-mode .custom-section input.cs-title {
+    box-shadow: none !important;
+    min-height: 0 !important;
+}
+/* Cancel the focus-expand transitions during capture — there is no focus,
+   but the previously-focused element can keep the inflated size otherwise. */
+body.pdf-export-mode textarea,
+body.pdf-export-mode input {
+    transition: none !important;
+}
+
 /* --- Small screens --- */
 @media (max-width: 720px) {
     body { padding: 0 12px 220px; }
@@ -1647,7 +1699,7 @@ nav.table_of_contents a:hover {
         "https://farah-farah555.app.n8n.cloud/webhook/47bd183e-61f3-49c9-952a-728d85ad2551";
 
     const JSPDF_URL = "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js";
-    const AUTOTABLE_URL = "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js";
+    const HTML2CANVAS_URL = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js";
     const saveStatusEl = document.getElementById("save-status");
     const progressFill = document.getElementById("progress-bar-fill");
     const progressLabel = document.getElementById("progress-label");
@@ -2084,18 +2136,31 @@ nav.table_of_contents a:hover {
         return lines.join("\n");
     }
 
-    // ---- Lazy-load jsPDF + autoTable from CDN ----
+    // ---- Lazy-load jsPDF + html2canvas from CDN ----
+    // The PDF is now a literal snapshot of the page as the reviewer sees
+    // it (same colors, same cards, same radio pills, same filled answers).
+    // jsPDF stitches the html2canvas output into A4 pages.
     let _jsPDFPromise = null;
     function loadJsPDF() {
         if (_jsPDFPromise) return _jsPDFPromise;
         _jsPDFPromise = (async () => {
             await loadScript(JSPDF_URL);
-            await loadScript(AUTOTABLE_URL);
             const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
             if (!ctor) throw new Error("jsPDF failed to load");
             return ctor;
         })();
         return _jsPDFPromise;
+    }
+    let _h2cPromise = null;
+    function loadHtml2Canvas() {
+        if (_h2cPromise) return _h2cPromise;
+        _h2cPromise = (async () => {
+            if (window.html2canvas) return window.html2canvas;
+            await loadScript(HTML2CANVAS_URL);
+            if (!window.html2canvas) throw new Error("html2canvas failed to load");
+            return window.html2canvas;
+        })();
+        return _h2cPromise;
     }
     function loadScript(src) {
         return new Promise((resolve, reject) => {
@@ -2107,112 +2172,154 @@ nav.table_of_contents a:hover {
         });
     }
 
-    // ---- PDF builder ----
+    // ---- PDF builder (DOM snapshot of the page) ----
+    //
+    // Why per-chunk instead of one big html2canvas() over <body>:
+    // the workbook expands to ~30 000+ px when every <details> is opened,
+    // which exceeds the per-canvas pixel limits in Chrome/Safari
+    // (~32 767 px or ~268 MP). Rendering the page-body's children
+    // one-by-one keeps every intermediate canvas comfortably small and
+    // lets us paginate at logical chapter boundaries.
     async function buildPDFBlob(report) {
-        const JsPDF = await loadJsPDF();
-        const doc = new JsPDF({ unit: "mm", format: "a4" });
-        const pageW = doc.internal.pageSize.getWidth();
-        const margin = 14;
-        let y = 18;
+        const [JsPDF, html2canvas] = await Promise.all([loadJsPDF(), loadHtml2Canvas()]);
 
-        doc.setFont("helvetica", "bold").setFontSize(18).setTextColor(12, 74, 110);
-        doc.text("Lebanese Embassy Review", margin, y);
-        y += 7;
-        doc.setFont("helvetica", "normal").setFontSize(10).setTextColor(80, 80, 80);
-        doc.text("Submitted " + new Date().toLocaleString(), margin, y); y += 8;
-
-        const s = report.summary;
-        doc.setFontSize(10).setTextColor(30, 30, 30);
-        const summaryLines = [
-            "Sections complete: " + s.complete + " / " + s.totalSections +
-                "   (Approved: " + s.approved +
-                "   Has corrections: " + s.needsCorrections +
-                "   Unanswered: " + s.unanswered + ")",
-            "Required fields filled: " +
-                (s.requiredFieldsTotal - s.requiredFieldsUnfilled) + " / " + s.requiredFieldsTotal,
-        ];
-        summaryLines.forEach(l => { doc.text(l, margin, y); y += 5; });
-        y += 4;
-
-        const verdictColor = {
-            "correct":    [22, 163, 74],
-            "incorrect":  [220, 38, 38],
-            "unanswered": [148, 163, 184],
-        };
-        const verdictLabel = {
-            "correct": "Approved",
-            "incorrect": "Has corrections",
-            "unanswered": "Not reviewed",
-        };
-
-        report.sections.forEach(sec => {
-            if (y > 270) { doc.addPage(); y = 18; }
-            doc.setFont("helvetica", "bold").setFontSize(12).setTextColor(12, 74, 110);
-            const titleLines = doc.splitTextToSize(sec.title, pageW - margin * 2);
-            doc.text(titleLines, margin, y); y += titleLines.length * 5;
-
-            const vc = verdictColor[sec.verdict] || [80, 80, 80];
-            doc.setFont("helvetica", "bold").setFontSize(9).setTextColor(vc[0], vc[1], vc[2]);
-            doc.text(verdictLabel[sec.verdict] || sec.verdict, margin, y); y += 5;
-
-            if (sec.requiredFields > 0) {
-                doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(180, 83, 9);
-                doc.text("Required: " + (sec.requiredFields - sec.requiredFieldsUnfilled) +
-                    " / " + sec.requiredFields + " filled", margin, y); y += 4;
-            }
-            y += 1;
-
-            if (sec.items.length) {
-                doc.autoTable({
-                    startY: y,
-                    head: [["Question / field", "Answer", ""]],
-                    body: sec.items.map(it => [
-                        it.question || "",
-                        String(it.answer || ""),
-                        it.required ? "REQ" : "",
-                    ]),
-                    styles: { fontSize: 8, cellPadding: 2, valign: "top", textColor: [40, 40, 40] },
-                    headStyles: { fillColor: [12, 74, 110], textColor: 255, fontSize: 8.5 },
-                    columnStyles: {
-                        0: { cellWidth: 65 },
-                        1: { cellWidth: "auto" },
-                        2: { cellWidth: 12, halign: "center", textColor: [180, 83, 9], fontStyle: "bold" },
-                    },
-                    margin: { left: margin, right: margin },
-                });
-                y = doc.lastAutoTable.finalY + 6;
-            } else {
-                doc.setFont("helvetica", "italic").setFontSize(9).setTextColor(120, 120, 120);
-                doc.text("(no entries)", margin, y); y += 6;
-            }
+        // ── 1. Prepare the DOM for capture ───────────────────────────
+        // Force every <details> open, expand textareas to their scroll
+        // height, and switch <body> into pdf-export-mode (no app bar,
+        // no action bar, no focus rings).
+        const detailsState = [];
+        document.querySelectorAll('details').forEach(d => {
+            detailsState.push([d, d.open]);
+            d.open = true;
+        });
+        const fieldState = [];
+        document.querySelectorAll('textarea').forEach(t => {
+            fieldState.push([t, t.style.cssText]);
+            // Defocus + clear the focus-expand so the natural content
+            // height (scrollHeight) is accurate.
+            t.blur();
+            t.style.minHeight = '0';
+            t.style.height = 'auto';
+            t.style.height = Math.max(t.scrollHeight, 32) + 'px';
+            t.style.overflow = 'hidden';
+        });
+        document.querySelectorAll('input.review-url, input.cs-title').forEach(i => {
+            fieldState.push([i, i.style.cssText]);
+            i.blur();
         });
 
-        if (report.customSections && report.customSections.length) {
-            doc.addPage();
-            y = 18;
-            doc.setFont("helvetica", "bold").setFontSize(16).setTextColor(12, 74, 110);
-            doc.text("Additional sections", margin, y); y += 8;
-            doc.setFont("helvetica", "normal").setFontSize(9).setTextColor(80, 80, 80);
-            doc.text("Custom sections added by the reviewer.", margin, y); y += 8;
+        document.body.classList.add('pdf-export-mode');
+        // Two RAFs ⇒ ensure the new styles + textarea heights have flushed.
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
 
-            report.customSections.forEach(cs => {
-                if (y > 260) { doc.addPage(); y = 18; }
-                doc.setFont("helvetica", "bold").setFontSize(12).setTextColor(12, 74, 110);
-                doc.text(cs.title || "(untitled)", margin, y); y += 6;
-                doc.setFont("helvetica", "normal").setFontSize(10).setTextColor(40, 40, 40);
-                const lines = doc.splitTextToSize(cs.body || "", pageW - margin * 2);
-                doc.text(lines, margin, y); y += lines.length * 5 + 6;
+        const cleanup = () => {
+            document.body.classList.remove('pdf-export-mode');
+            fieldState.forEach(([el, css]) => { el.style.cssText = css; });
+            detailsState.forEach(([el, open]) => { el.open = open; });
+        };
+
+        // ── 2. Pick the logical chunks to capture ────────────────────
+        // <article class="page"> > <header>            (page title)
+        // <article class="page"> > <div class="page-body"> > each child block
+        // <section id="custom-sections-area">          (reviewer-added)
+        function collectChunks() {
+            const out = [];
+            const article = document.querySelector('article.page');
+            if (article) {
+                Array.from(article.children).forEach(child => {
+                    if (!child.tagName) return;
+                    if (child.classList && child.classList.contains('page-body')) {
+                        Array.from(child.children).forEach(grand => {
+                            if (grand.tagName && grand.textContent.trim()) out.push(grand);
+                        });
+                    } else if (child.textContent.trim()) {
+                        out.push(child);
+                    }
+                });
+            }
+            const custom = document.getElementById('custom-sections-area');
+            if (custom && custom.textContent.trim() && !out.includes(custom)) out.push(custom);
+            return out;
+        }
+        const chunks = collectChunks();
+
+        // ── 3. Build the PDF, paginating chunk-by-chunk ──────────────
+        const doc = new JsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
+        const margin = 8;
+        const usableW = pageW - margin * 2;
+        const usableH = pageH - margin * 2;
+        let cursorY = margin;
+        let hasContent = false;
+
+        async function addImageSlice(canvas, sliceTopPx, slicePx, drawMM) {
+            const slice = document.createElement('canvas');
+            slice.width = canvas.width;
+            slice.height = slicePx;
+            const ctx = slice.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, slice.width, slice.height);
+            ctx.drawImage(canvas, 0, -sliceTopPx);
+            doc.addImage(slice.toDataURL('image/jpeg', 0.85), 'JPEG',
+                margin, cursorY, usableW, drawMM);
+        }
+
+        async function placeChunk(el) {
+            const canvas = await html2canvas(el, {
+                scale: 1.5,
+                useCORS: true,
+                backgroundColor: '#ffffff',
+                logging: false,
+                windowWidth: 1180,
             });
+            const totalMM = canvas.height * usableW / canvas.width;
+            const pxPerMM = canvas.width / usableW;
+
+            if (totalMM <= usableH) {
+                if (hasContent && cursorY + totalMM > pageH - margin) {
+                    doc.addPage(); cursorY = margin;
+                }
+                await addImageSlice(canvas, 0, canvas.height, totalMM);
+                cursorY += totalMM + 2;
+                hasContent = true;
+                return;
+            }
+
+            // Tall chunk: paginate. Each slice starts on a fresh page.
+            let consumed = 0;
+            while (consumed < totalMM) {
+                if (hasContent) { doc.addPage(); cursorY = margin; }
+                const remainingMM = totalMM - consumed;
+                const sliceMM = Math.min(usableH, remainingMM);
+                const slicePx = Math.round(sliceMM * pxPerMM);
+                const topPx = Math.round(consumed * pxPerMM);
+                await addImageSlice(canvas, topPx, slicePx, sliceMM);
+                cursorY += sliceMM + 2;
+                hasContent = true;
+                consumed += sliceMM;
+            }
         }
 
-        const total = doc.internal.getNumberOfPages();
-        for (let i = 1; i <= total; i++) {
-            doc.setPage(i);
-            doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(150, 150, 150);
-            doc.text("Lebanese Embassy Review — page " + i + " of " + total,
-                pageW / 2, doc.internal.pageSize.getHeight() - 8, { align: "center" });
+        try {
+            for (const chunk of chunks) {
+                try { await placeChunk(chunk); }
+                catch (chunkErr) { console.warn("PDF chunk render failed:", chunkErr); }
+            }
+
+            // Footer with page numbers + a tiny submission timestamp.
+            const total = doc.internal.getNumberOfPages();
+            for (let i = 1; i <= total; i++) {
+                doc.setPage(i);
+                doc.setFont("helvetica", "normal").setFontSize(8).setTextColor(150, 150, 150);
+                doc.text("Lebanese Embassy Review — submitted " + new Date().toLocaleString() +
+                    "  ·  page " + i + " of " + total,
+                    pageW / 2, pageH - 4, { align: "center" });
+            }
+            return doc.output("blob");
+        } finally {
+            cleanup();
         }
-        return doc.output("blob");
     }
 
     // ---- Submit ----
