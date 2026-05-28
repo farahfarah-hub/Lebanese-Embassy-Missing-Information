@@ -279,6 +279,62 @@ def convert_section_verdicts(soup: BeautifulSoup) -> int:
     return converted
 
 
+def remove_table_of_contents(soup: BeautifulSoup) -> int:
+    """Drop the "Workbook contents" callout entirely.
+
+    Notion renders the table of contents inside a callout figure:
+        <figure class="block-color-gray_background callout">
+            <span class="icon">📑</span>
+            <p>Workbook contents</p>
+            <nav class="table_of_contents">…</nav>
+        </figure>
+    We blow away the whole figure (not just the nav) so the icon and
+    heading don't linger as an orphan.
+    """
+    removed = 0
+    for nav in list(soup.find_all("nav", class_="table_of_contents")):
+        figure = nav.find_parent("figure", class_="callout")
+        if figure is not None:
+            figure.decompose()
+        else:
+            nav.decompose()
+        removed += 1
+    return removed
+
+
+def remove_sections_by_label(soup: BeautifulSoup, labels: list[str]) -> int:
+    """Decompose every <details> whose label / summary text matches one
+    of the given labels (case-insensitive, ``in`` match). Used to drop
+    sections that the embassy explicitly does not want in the workbook
+    (e.g. "9.6 Language & accessibility")."""
+    removed = 0
+    needles = [lbl.lower() for lbl in labels]
+    for details in list(soup.find_all("details")):
+        label = (details.get("data-section-label") or "").lower()
+        if not label:
+            summary = details.find("summary", recursive=False)
+            if summary is not None:
+                label = summary.get_text(" ", strip=True).lower()
+        if not label:
+            continue
+        if any(needle in label for needle in needles):
+            details.decompose()
+            removed += 1
+    return removed
+
+
+def collapse_all_details(soup: BeautifulSoup) -> int:
+    """Force every ``<details>`` to render closed by default. Reviewer
+    requested that nothing be auto-expanded — they want to drill in
+    section-by-section."""
+    closed = 0
+    for d in soup.find_all("details"):
+        if d.has_attr("open"):
+            del d["open"]
+            closed += 1
+    return closed
+
+
 def remove_obsolete_edit_icon(soup: BeautifulSoup) -> dict:
     """Sweep the legacy ``✏️`` glyph out of the workbook.
 
@@ -465,19 +521,39 @@ def convert_inline_review_paragraphs(soup: BeautifulSoup) -> int:
     """Some free-text notes in the workbook end with an inline reviewer
     prompt like ``☐ ✅ Correct  ☐ ❌ Incorrect  ☐ ✏️ Needs update``
     (not inside a table). Replace that suffix with a 2-option radio group.
+
+    Paragraphs that sit *inside a callout figure* are explanatory (e.g.
+    the "Review status legend" box that describes what the symbols mean).
+    Those are NOT reviewer prompts — we just strip the stale ``☐`` glyphs
+    and the now-defunct ``✏️ Needs update`` text and leave the paragraph
+    as plain prose. No radio buttons are added.
     """
     converted = 0
     for p in list(soup.find_all("p")):
         text = p.get_text()
         if not _INLINE_REVIEW_RE.search(text):
             continue
-        # Remove the trailing checkbox tokens from the paragraph text and append
-        # a real radio group in their place.
+
+        in_callout = p.find_parent("figure", class_="callout") is not None
+
+        # Remove the trailing checkbox tokens from the paragraph text.
         for node in list(p.descendants):
             if isinstance(node, NavigableString):
                 new_text = _INLINE_REVIEW_RE.sub("", str(node))
+                if in_callout:
+                    # Belt-and-braces clean-up for the legend: drop any
+                    # leftover ``☐`` and the ``✏️ Needs update`` segment
+                    # if the regex didn't catch it (e.g. when the glyphs
+                    # were split across multiple text nodes).
+                    new_text = re.sub(r"☐\s*", "", new_text)
+                    new_text = re.sub(r"\s*✏️[^✅❌\n]*", "", new_text)
                 if new_text != str(node):
                     node.replace_with(NavigableString(new_text))
+
+        if in_callout:
+            # Explanatory paragraph — don't add a clickable widget.
+            continue
+
         # Append the radio group widget.
         widget = _new_tag("span", {"class": "inline-review"})
         name = next_field_id("review")
@@ -531,6 +607,16 @@ def transform(soup: BeautifulSoup) -> dict:
 
     # Clean up the now-orphaned ✏️ legend bullet + callout icon.
     stats["edit_icon_cleanup"] = remove_obsolete_edit_icon(soup)
+
+    # Structural pruning requested by the embassy: drop the workbook TOC
+    # and the "9.6 Language & accessibility" sub-section. Then force every
+    # remaining <details> closed by default so the reviewer drills in
+    # one section at a time.
+    stats["toc_removed"] = remove_table_of_contents(soup)
+    stats["sections_removed"] = remove_sections_by_label(
+        soup, ["9.6 Language & accessibility"]
+    )
+    stats["details_collapsed"] = collapse_all_details(soup)
 
     return stats
 
@@ -1172,10 +1258,8 @@ details.custom-section textarea.cs-body:focus {
 
 /* --- Top-right floating actions ------------------------------------------
    Replaces the old dark bottom pill bar. One prominent green Submit
-   button, a compact secondary row (Expand / Collapse) and a tiny
-   tertiary row (JSON / Clear). The container has pointer-events:none
-   so the gaps between buttons let scroll/clicks through to the page;
-   each child sets pointer-events:auto to remain interactive. */
+   button and a tiny tertiary row (JSON / Clear). All elements are
+   fully interactive — no pointer-events trickery. */
 .portal-floating-actions {
     position: fixed;
     top: 86px;
@@ -1186,9 +1270,7 @@ details.custom-section textarea.cs-body:focus {
     align-items: stretch;
     gap: 10px;
     width: 210px;
-    pointer-events: none;
 }
-.portal-floating-actions > * { pointer-events: auto; }
 
 .action-submit {
     appearance: none;
@@ -1231,9 +1313,10 @@ details.custom-section textarea.cs-body:focus {
 }
 @keyframes portal-spin { to { transform: rotate(360deg); } }
 
-.action-tools {
+.action-tools-mini {
     display: flex;
     gap: 4px;
+    justify-content: center;
     background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(10px);
     border: 1px solid var(--line);
@@ -1241,39 +1324,20 @@ details.custom-section textarea.cs-body:focus {
     padding: 5px;
     box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
 }
-.action-tools button {
+.action-tools-mini button {
     flex: 1;
     background: transparent;
     border: none;
-    color: var(--text);
-    padding: 8px 6px;
-    border-radius: 7px;
+    color: var(--muted);
+    padding: 7px 6px;
     font: inherit;
     font-size: 0.78rem;
     font-weight: 500;
     cursor: pointer;
-    transition: background 120ms, color 120ms;
-}
-.action-tools button:hover { background: var(--brand-soft); color: var(--brand); }
-
-.action-tools-mini {
-    display: flex;
-    gap: 4px;
-    justify-content: space-between;
-    padding: 0 4px;
-}
-.action-tools-mini button {
-    background: transparent;
-    border: none;
-    color: var(--muted);
-    padding: 4px 6px;
-    font: inherit;
-    font-size: 0.72rem;
-    cursor: pointer;
-    border-radius: 6px;
+    border-radius: 7px;
     transition: color 120ms, background 120ms;
 }
-.action-tools-mini button:hover { color: var(--text); background: rgba(255, 255, 255, 0.7); }
+.action-tools-mini button:hover { color: var(--brand); background: var(--brand-soft); }
 .action-tools-mini button.danger:hover { color: var(--bad); background: rgba(220, 38, 38, 0.08); }
 
 @media print {
@@ -1368,10 +1432,6 @@ ACTIONBAR_HTML = """
 <div class="portal-floating-actions" role="toolbar" aria-label="Review actions">
   <button type="button" id="btn-submit" class="action-submit"
           title="Email a filled-in HTML snapshot of this review to the project owner">📤 Submit review</button>
-  <div class="action-tools">
-    <button type="button" id="btn-expand"   title="Expand every section">⊕ Expand all</button>
-    <button type="button" id="btn-collapse" title="Collapse every section">⊖ Collapse all</button>
-  </div>
   <div class="action-tools-mini">
     <button type="button" id="btn-download" title="Download a JSON file of all your answers">⬇ JSON</button>
     <button type="button" id="btn-clear" class="danger" title="Delete your saved draft from this browser">🗑 Clear</button>
@@ -1690,13 +1750,11 @@ PORTAL_JS = r"""
     let customCounter = 0;
 
     function getMainSectionCount() {
-        // The TOC sits at the top of the page; its indent-0 items are the
-        // workbook's top-level chapters (1., 2., …). Falls back to 10
-        // (the current workbook size) if the TOC ever disappears.
-        const items = document.querySelectorAll(
-            'nav.table_of_contents .table_of_contents-item.table_of_contents-indent-0'
-        );
-        return items.length || 10;
+        // The workbook's top-level chapter count. We used to read this
+        // off the TOC, but that callout was removed at build time. Use
+        // the hardcoded count of the embassy workbook instead — the
+        // build script can update this if chapters are added/removed.
+        return 10;
     }
 
     function renumberCustomSections() {
@@ -1795,10 +1853,6 @@ PORTAL_JS = r"""
         saveStatusEl.textContent = "Draft cleared";
         saveStatusEl.classList.remove("saved");
         toast("Draft cleared", "info");
-    }
-
-    function expandAll(open) {
-        document.querySelectorAll('details').forEach(d => { d.open = open; });
     }
 
     // ---- CSV builder ----
@@ -2148,8 +2202,6 @@ PORTAL_JS = r"""
         document.getElementById("btn-submit").addEventListener("click", submitReview);
         document.getElementById("btn-clear").addEventListener("click", clearDraft);
         document.getElementById("btn-download").addEventListener("click", downloadJSON);
-        document.getElementById("btn-expand").addEventListener("click", () => expandAll(true));
-        document.getElementById("btn-collapse").addEventListener("click", () => expandAll(false));
         document.getElementById("btn-add-section").addEventListener("click", () => addCustomSection("", "", true));
     });
 })();
