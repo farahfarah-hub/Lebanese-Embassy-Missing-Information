@@ -259,11 +259,55 @@ def convert_section_verdicts(soup: BeautifulSoup) -> int:
 
         leaf = verdict_block.find_parent("details")
         if leaf is not None:
+            # The original "Overall review status" prompt lived at the BOTTOM
+            # of the section. We want the verdict pill to be the first thing
+            # the reviewer sees, so hoist it to the top of the section's
+            # indented content area (same place as injected verdicts).
+            verdict_block.extract()
+            indented = leaf.find("div", class_="indented", recursive=False)
+            summary = leaf.find("summary", recursive=False)
+            if indented is not None:
+                indented.insert(0, verdict_block)
+            elif summary is not None:
+                summary.insert_after(verdict_block)
+            else:
+                leaf.insert(0, verdict_block)
             leaf["data-section-id"] = verdict_id
             if section_label:
                 leaf["data-section-label"] = section_label
         converted += 1
     return converted
+
+
+def remove_obsolete_edit_icon(soup: BeautifulSoup) -> dict:
+    """Sweep the legacy ``✏️`` glyph out of the workbook.
+
+    Two appearances need cleaning up now that the third reviewer option
+    has been collapsed to "✅ Correct / ❌ Incorrect":
+
+      * the "Review status legend" bullet that explained the now-defunct
+        ``✏️ Needs update`` option — drop the whole bullet (and its
+        wrapping ``<ul>`` if it becomes empty).
+      * the yellow callout box "Embassy to confirm / complete for
+        sections 8.2 – 8.6" — replace the icon with ``📝`` so the box
+        still reads as a to-do, just without the pencil/edit affordance.
+    """
+    stats = {"legend_bullets_removed": 0, "callout_icons_swapped": 0}
+
+    for li in list(soup.find_all("li")):
+        if li.get_text(strip=True).startswith("✏️"):
+            parent_ul = li.find_parent("ul")
+            li.decompose()
+            if parent_ul is not None and not parent_ul.find("li"):
+                parent_ul.decompose()
+            stats["legend_bullets_removed"] += 1
+
+    for icon_span in soup.find_all("span", class_="icon"):
+        if icon_span.get_text(strip=True) == "✏️":
+            icon_span.string = "📝"
+            stats["callout_icons_swapped"] += 1
+
+    return stats
 
 
 def inject_verdicts_into_remaining_leaves(soup: BeautifulSoup) -> int:
@@ -485,6 +529,9 @@ def transform(soup: BeautifulSoup) -> dict:
     stats["verdicts_converted"] = convert_section_verdicts(soup)
     stats["verdicts_injected"] = inject_verdicts_into_remaining_leaves(soup)
 
+    # Clean up the now-orphaned ✏️ legend bullet + callout icon.
+    stats["edit_icon_cleanup"] = remove_obsolete_edit_icon(soup)
+
     return stats
 
 
@@ -520,7 +567,7 @@ body {
     body {
         max-width: 1180px;
         margin: 0 auto;
-        padding: 0 24px 200px;
+        padding: 0 24px 60px;
     }
 }
 
@@ -988,6 +1035,10 @@ nav.table_of_contents a:hover {
 }
 
 /* --- Custom sections (reviewer additions) --- */
+/* The reviewer-added sections now look like the rest of the workbook:
+   a card-style <details>, blue summary, dashed-border editable title
+   that switches to a solid bordered input on focus. They auto-number
+   themselves from the last main-section number + 1 onwards. */
 .custom-sections-area {
     margin: 30px 0 20px;
     padding: 24px;
@@ -1008,41 +1059,82 @@ nav.table_of_contents a:hover {
 #custom-sections-list { display: flex; flex-direction: column; gap: 14px; }
 #custom-sections-list:empty { display: none; }
 
-.custom-section {
-    background: white;
-    border: 1px solid #99f6e4;
+details.custom-section {
+    background: var(--bg-card);
+    border: 1px solid var(--line);
     border-radius: 12px;
-    padding: 16px 18px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    padding: 20px 24px;
+    margin: 0;
     box-shadow: var(--shadow);
 }
-.custom-section .row {
+details.custom-section > summary {
+    cursor: pointer;
+    list-style: none;
     display: flex;
-    gap: 10px;
     align-items: center;
+    gap: 12px;
+    color: var(--brand);
 }
-.custom-section input.cs-title {
+details.custom-section > summary::-webkit-details-marker { display: none; }
+details.custom-section > summary::before {
+    content: "▸";
+    color: var(--muted);
+    transition: transform 120ms;
+    flex-shrink: 0;
+    font-size: 0.9rem;
+}
+details.custom-section[open] > summary::before { transform: rotate(90deg); }
+details.custom-section .cs-number {
+    font-weight: 700;
+    font-size: 1.15rem;
+    color: var(--brand);
+    flex-shrink: 0;
+    padding-right: 12px;
+    border-right: 2px solid var(--line);
+    min-width: 44px;
+    text-align: right;
+}
+details.custom-section .cs-title {
     flex: 1;
     font-size: 1.05rem;
     font-weight: 600;
     color: var(--brand);
-    padding: 10px 12px;
-    border: 1px solid var(--line-strong);
-    border-radius: 8px;
-    background: #fdfdfd;
-    transition: border-color 120ms, box-shadow 200ms, font-size 200ms;
+    background: transparent;
+    border: 1px dashed var(--line-strong);
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-family: inherit;
+    transition: border-color 120ms, background 120ms, box-shadow 200ms;
+    min-width: 0;
 }
-.custom-section input.cs-title:focus {
+details.custom-section .cs-title:hover { background: rgba(255, 255, 255, 0.6); border-color: var(--brand-soft); }
+details.custom-section .cs-title:focus {
     outline: none;
+    border-style: solid;
     border-color: var(--brand);
-    box-shadow: 0 6px 22px rgba(12, 74, 110, 0.18);
-    font-size: 1.15rem;
+    background: white;
+    box-shadow: 0 4px 14px rgba(12, 74, 110, 0.15);
 }
-.custom-section textarea.cs-body {
+details.custom-section .cs-title::placeholder { font-weight: 500; color: var(--muted); font-style: italic; }
+details.custom-section .cs-remove {
+    appearance: none;
+    border: none;
+    background: #fee2e2;
+    color: #991b1b;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 120ms;
+}
+details.custom-section .cs-remove:hover { background: #fecaca; }
+details.custom-section .cs-body-wrapper { margin-top: 16px; }
+details.custom-section textarea.cs-body {
     width: 100%;
-    min-height: 90px;
+    min-height: 100px;
     padding: 10px 12px;
     font: inherit;
     font-size: 0.95rem;
@@ -1051,28 +1143,16 @@ nav.table_of_contents a:hover {
     border: 1px solid var(--line-strong);
     border-radius: 8px;
     resize: vertical;
-    transition: min-height 200ms, box-shadow 200ms, font-size 200ms;
+    transition: min-height 200ms ease, box-shadow 200ms, font-size 200ms;
 }
-.custom-section textarea.cs-body:focus {
+details.custom-section textarea.cs-body:focus {
     outline: none;
     border-color: var(--brand);
     box-shadow: 0 8px 28px rgba(12, 74, 110, 0.18);
-    min-height: 200px;
+    min-height: 220px;
     font-size: 1rem;
+    background: white;
 }
-.cs-remove {
-    appearance: none;
-    border: none;
-    background: #fee2e2;
-    color: #991b1b;
-    padding: 8px 12px;
-    border-radius: 8px;
-    font-size: 0.82rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 120ms;
-}
-.cs-remove:hover { background: #fecaca; }
 #btn-add-section {
     margin-top: 14px;
     appearance: none;
@@ -1090,78 +1170,125 @@ nav.table_of_contents a:hover {
 }
 #btn-add-section:hover { filter: brightness(1.08); transform: translateY(-1px); }
 
-/* --- Bottom action bar --- */
-.portal-actionbar {
+/* --- Top-right floating actions ------------------------------------------
+   Replaces the old dark bottom pill bar. One prominent green Submit
+   button, a compact secondary row (Expand / Collapse) and a tiny
+   tertiary row (JSON / Clear). The container has pointer-events:none
+   so the gaps between buttons let scroll/clicks through to the page;
+   each child sets pointer-events:auto to remain interactive. */
+.portal-floating-actions {
     position: fixed;
-    bottom: 16px; left: 50%;
-    transform: translateX(-50%);
-    z-index: 70;
+    top: 86px;
+    right: 20px;
+    z-index: 65;
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
     gap: 10px;
-    padding: 10px 14px;
-    background: rgba(15, 23, 42, 0.95);
-    backdrop-filter: blur(8px);
-    color: white;
-    border-radius: 999px;
-    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.35);
-    flex-wrap: wrap;
-    max-width: calc(100vw - 32px);
-    justify-content: center;
+    width: 210px;
+    pointer-events: none;
 }
-.portal-actionbar button {
+.portal-floating-actions > * { pointer-events: auto; }
+
+.action-submit {
     appearance: none;
     border: none;
-    background: rgba(255,255,255,0.08);
-    color: white;
-    padding: 8px 14px;
-    border-radius: 999px;
-    font: inherit;
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    transition: background 120ms, transform 120ms;
-}
-.portal-actionbar button:hover { background: rgba(255,255,255,0.18); }
-.portal-actionbar button.primary {
-    background: linear-gradient(135deg, #f97316, #ea580c);
-    color: white;
-}
-.portal-actionbar button.primary:hover { transform: translateY(-1px); filter: brightness(1.05); }
-.portal-actionbar button.danger:hover { background: #b91c1c; }
-
-.portal-actionbar button.submit {
     background: linear-gradient(135deg, #16a34a, #15803d);
     color: white;
+    padding: 14px 18px;
+    border-radius: 12px;
+    font: inherit;
+    font-size: 0.95rem;
     font-weight: 700;
-    padding: 10px 18px;
-    box-shadow: 0 4px 14px rgba(22, 163, 74, 0.35);
+    cursor: pointer;
+    box-shadow: 0 10px 24px rgba(22, 163, 74, 0.40);
+    transition: filter 120ms, transform 120ms, box-shadow 200ms, background 200ms;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
 }
-.portal-actionbar button.submit:hover { transform: translateY(-1px); filter: brightness(1.08); }
-.portal-actionbar button.submit[disabled] {
-    opacity: 0.7;
+.action-submit:hover {
+    filter: brightness(1.08);
+    transform: translateY(-2px);
+    box-shadow: 0 14px 30px rgba(22, 163, 74, 0.50);
+}
+.action-submit[disabled] {
+    opacity: 0.78;
     cursor: progress;
     filter: grayscale(0.2);
+    transform: none;
 }
-.portal-actionbar button.submit.success {
-    background: linear-gradient(135deg, #0ea5e9, #0369a1);
-}
-.portal-actionbar button.submit.error {
-    background: linear-gradient(135deg, #dc2626, #991b1b);
-}
-.portal-actionbar button.submit .spin {
+.action-submit.success { background: linear-gradient(135deg, #0ea5e9, #0369a1); }
+.action-submit.error   { background: linear-gradient(135deg, #dc2626, #991b1b); }
+.action-submit .spin {
     display: inline-block;
-    width: 12px; height: 12px;
+    width: 13px; height: 13px;
     border: 2px solid rgba(255,255,255,0.4);
     border-top-color: white;
     border-radius: 50%;
     animation: portal-spin 800ms linear infinite;
-    margin-right: 4px;
-    vertical-align: -2px;
 }
 @keyframes portal-spin { to { transform: rotate(360deg); } }
+
+.action-tools {
+    display: flex;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 5px;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+.action-tools button {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    padding: 8px 6px;
+    border-radius: 7px;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 120ms, color 120ms;
+}
+.action-tools button:hover { background: var(--brand-soft); color: var(--brand); }
+
+.action-tools-mini {
+    display: flex;
+    gap: 4px;
+    justify-content: space-between;
+    padding: 0 4px;
+}
+.action-tools-mini button {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    padding: 4px 6px;
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: color 120ms, background 120ms;
+}
+.action-tools-mini button:hover { color: var(--text); background: rgba(255, 255, 255, 0.7); }
+.action-tools-mini button.danger:hover { color: var(--bad); background: rgba(220, 38, 38, 0.08); }
+
+@media print {
+    .portal-floating-actions { display: none !important; }
+}
+@media (max-width: 720px) {
+    .portal-floating-actions {
+        top: auto;
+        bottom: 16px;
+        right: 12px;
+        left: 12px;
+        width: auto;
+    }
+    .action-submit { padding: 12px 16px; }
+}
 
 /* --- Toast --- */
 .portal-toast {
@@ -1184,7 +1311,7 @@ nav.table_of_contents a:hover {
 
 /* --- Print styles --- */
 @media print {
-    .portal-appbar, .portal-actionbar, .portal-toast { display: none !important; }
+    .portal-appbar, .portal-floating-actions, .portal-toast { display: none !important; }
     body { padding: 0 !important; max-width: none !important; }
     .page-body details { break-inside: avoid; box-shadow: none; border: 1px solid #ccc; }
     .page-body details, .page-body details details { background: white !important; }
@@ -1202,7 +1329,7 @@ nav.table_of_contents a:hover {
 
 /* --- Small screens --- */
 @media (max-width: 720px) {
-    body { padding: 0 12px 220px; }
+    body { padding: 0 12px 140px; }
     .portal-appbar { padding: 10px 12px; margin-left: -12px; margin-right: -12px; }
     .portal-appbar .save-status { display: none; }
     table.simple-table { font-size: 0.82rem; }
@@ -1238,14 +1365,17 @@ CUSTOM_SECTIONS_HTML = """
 """
 
 ACTIONBAR_HTML = """
-<div class="portal-actionbar" role="toolbar" aria-label="Review actions">
-  <button type="button" id="btn-save"     title="Save your progress to this browser">💾 Save draft</button>
-  <button type="button" id="btn-submit"   class="submit" title="Email a filled-in HTML snapshot of this review to the project owner">📤 Submit review</button>
-  <button type="button" id="btn-download" title="Download a JSON file of all your answers">⬇️ Download (JSON)</button>
-  <button type="button" id="btn-print"    title="Print or save as PDF locally">🖨️ Print / Save as PDF</button>
-  <button type="button" id="btn-expand"   title="Expand every section">⊕ Expand all</button>
-  <button type="button" id="btn-collapse" title="Collapse every section">⊖ Collapse all</button>
-  <button type="button" id="btn-clear"    class="danger" title="Delete your saved draft from this browser">🗑️ Clear draft</button>
+<div class="portal-floating-actions" role="toolbar" aria-label="Review actions">
+  <button type="button" id="btn-submit" class="action-submit"
+          title="Email a filled-in HTML snapshot of this review to the project owner">📤 Submit review</button>
+  <div class="action-tools">
+    <button type="button" id="btn-expand"   title="Expand every section">⊕ Expand all</button>
+    <button type="button" id="btn-collapse" title="Collapse every section">⊖ Collapse all</button>
+  </div>
+  <div class="action-tools-mini">
+    <button type="button" id="btn-download" title="Download a JSON file of all your answers">⬇ JSON</button>
+    <button type="button" id="btn-clear" class="danger" title="Delete your saved draft from this browser">🗑 Clear</button>
+  </div>
 </div>
 <div class="portal-toast" id="portal-toast"></div>
 """
@@ -1552,37 +1682,88 @@ PORTAL_JS = r"""
     }
 
     // ---- Custom sections ----
+    // Each reviewer-added section renders as a numbered <details> card
+    // that matches the existing main-section UI. The number is computed
+    // from the workbook's main-section count + the card's position in
+    // the custom-sections list, and is refreshed whenever a card is
+    // added or removed.
     let customCounter = 0;
+
+    function getMainSectionCount() {
+        // The TOC sits at the top of the page; its indent-0 items are the
+        // workbook's top-level chapters (1., 2., …). Falls back to 10
+        // (the current workbook size) if the TOC ever disappears.
+        const items = document.querySelectorAll(
+            'nav.table_of_contents .table_of_contents-item.table_of_contents-indent-0'
+        );
+        return items.length || 10;
+    }
+
+    function renumberCustomSections() {
+        const start = getMainSectionCount() + 1;
+        document.querySelectorAll('#custom-sections-list > .custom-section').forEach((el, i) => {
+            const num = el.querySelector('.cs-number');
+            if (num) num.textContent = (start + i) + ".";
+        });
+    }
+
     function addCustomSection(title, body, persist) {
         customCounter++;
         const list = document.getElementById('custom-sections-list');
-        const card = document.createElement('div');
+        const card = document.createElement('details');
         card.className = 'custom-section';
         card.dataset.csId = String(customCounter);
-        card.innerHTML = `
-            <div class="row">
-                <input type="text" class="cs-title" placeholder="New section title (e.g. 'Online appointment booking')">
-                <button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>
-            </div>
-            <textarea class="cs-body" placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…"></textarea>
-        `;
+        card.open = true;
+        card.innerHTML =
+            '<summary>' +
+              '<span class="cs-number">11.</span>' +
+              '<input type="text" class="cs-title" ' +
+                'placeholder="New section title (e.g. \\'Online appointment booking\\')" ' +
+                'aria-label="Section title">' +
+              '<button type="button" class="cs-remove" aria-label="Remove this section">✕ Remove</button>' +
+            '</summary>' +
+            '<div class="cs-body-wrapper">' +
+              '<textarea class="cs-body" ' +
+                'placeholder="Describe the new service, fee, procedure, or anything else the chatbot should know…" ' +
+                'aria-label="Section content"></textarea>' +
+            '</div>';
+
+        const summaryEl  = card.querySelector('summary');
         const titleInput = card.querySelector('.cs-title');
-        const bodyArea = card.querySelector('.cs-body');
+        const bodyArea   = card.querySelector('.cs-body');
+        const removeBtn  = card.querySelector('.cs-remove');
+
         if (title) titleInput.value = title;
-        if (body) bodyArea.value = body;
-        card.querySelector('.cs-remove').addEventListener('click', () => {
+        if (body)  bodyArea.value   = body;
+
+        // Clicks inside the title input or the remove button should NOT
+        // toggle the <details> open/closed state.
+        function preventToggle(e) {
+            if (e.target.matches('input, button, textarea')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }
+        summaryEl.addEventListener('click', preventToggle);
+        summaryEl.addEventListener('mousedown', preventToggle);
+
+        removeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
             if (!confirm("Remove this custom section? Its content will be lost.")) return;
             card.remove();
+            renumberCustomSections();
             scheduleSave();
         });
+
         list.appendChild(card);
+        renumberCustomSections();
         if (persist !== false) scheduleSave();
-        // Auto-focus the title for a new (empty) card so the reviewer can start typing.
+        // Auto-focus the title for a brand-new (empty) card.
         if (persist !== false && !title) setTimeout(() => titleInput.focus(), 50);
     }
 
     function collectCustomSections() {
-        return Array.from(document.querySelectorAll('.custom-section')).map(card => ({
+        return Array.from(document.querySelectorAll('#custom-sections-list > .custom-section')).map(card => ({
             title: card.querySelector('.cs-title').value.trim(),
             body: card.querySelector('.cs-body').value.trim(),
         })).filter(cs => cs.title || cs.body);
@@ -1765,7 +1946,7 @@ PORTAL_JS = r"""
 
         // Strip interactive chrome + every <script>. The snapshot is static.
         docClone.querySelectorAll(
-            '.portal-appbar, .portal-actionbar, .portal-toast, ' +
+            '.portal-appbar, .portal-floating-actions, .portal-toast, ' +
             '#btn-add-section, .cs-remove, script'
         ).forEach(n => n.remove());
 
@@ -1913,17 +2094,17 @@ PORTAL_JS = r"""
             downloadBlob(htmlBlob, baseName + ".html");
 
             if (networkOk) {
-                setSubmitState("success", "✓ Sent! HTML saved locally too");
-                toast("Submitted to n8n — email on its way ✓  (HTML also downloaded)");
+                setSubmitState("success", "✓ Submitted");
+                toast("Submitted ✓  (HTML also saved locally)");
                 setTimeout(() => setSubmitState("idle"), 6000);
             } else {
                 setSubmitState("error");
                 toast(
-                    "Webhook send failed (" + errorDetail +
+                    "Submit failed (" + errorDetail +
                     ") — but your HTML was downloaded. You can email it manually.",
                     "error"
                 );
-                console.error("n8n submit failed:", errorDetail);
+                console.error("submit failed:", errorDetail);
                 setTimeout(() => setSubmitState("idle"), 9000);
             }
         } catch (err) {
@@ -1964,11 +2145,9 @@ PORTAL_JS = r"""
             updateProgress();
         });
 
-        document.getElementById("btn-save").addEventListener("click", () => { save(); toast("Saved"); });
         document.getElementById("btn-submit").addEventListener("click", submitReview);
         document.getElementById("btn-clear").addEventListener("click", clearDraft);
         document.getElementById("btn-download").addEventListener("click", downloadJSON);
-        document.getElementById("btn-print").addEventListener("click", () => window.print());
         document.getElementById("btn-expand").addEventListener("click", () => expandAll(true));
         document.getElementById("btn-collapse").addEventListener("click", () => expandAll(false));
         document.getElementById("btn-add-section").addEventListener("click", () => addCustomSection("", "", true));
