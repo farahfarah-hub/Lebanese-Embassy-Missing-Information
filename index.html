@@ -1413,44 +1413,113 @@ details.custom-section textarea.cs-body:focus {
 }
 #btn-add-section:hover { filter: brightness(1.08); transform: translateY(-1px); }
 
-/* --- Top-right floating actions ------------------------------------------
-   Replaces the old dark bottom pill bar. One prominent green Submit
-   button and a tiny tertiary row (JSON / Clear). All elements are
-   fully interactive — no pointer-events trickery. */
-.portal-floating-actions {
+/* --- Top-right utility widget (JSON / Clear) -----------------------------
+   Tiny secondary tools. The real Submit lives in a big card at the end
+   of the page now (see .submit-zone). */
+.portal-tools {
     position: fixed;
     top: 86px;
     right: 20px;
     z-index: 65;
     display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-    width: 210px;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 5px;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
 }
+.portal-tools button {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    padding: 7px 11px;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: 7px;
+    transition: color 120ms, background 120ms;
+}
+.portal-tools button:hover { color: var(--brand); background: var(--brand-soft); }
+.portal-tools button.danger:hover { color: var(--bad); background: rgba(220, 38, 38, 0.08); }
+
+/* --- End-of-page Submit zone ---------------------------------------------
+   Big, unmissable card that closes the review. Sits in normal document
+   flow at the bottom of <body> right after the Additional sections, so
+   the reviewer naturally arrives here once they're done. */
+.submit-zone {
+    margin: 56px auto 40px;
+    max-width: 880px;
+    padding: 36px 40px 40px;
+    border-radius: 18px;
+    background: linear-gradient(155deg, #f0fdf4 0%, #ecfdf5 50%, #f0f9ff 100%);
+    border: 1px solid #bbf7d0;
+    box-shadow: 0 18px 44px rgba(22, 163, 74, 0.12), 0 2px 6px rgba(15,23,42,0.04);
+    text-align: center;
+}
+.submit-zone__eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #047857;
+    margin: 0 0 10px;
+}
+.submit-zone__title {
+    margin: 0 0 8px;
+    font-size: 1.55rem;
+    font-weight: 700;
+    color: #0f172a;
+}
+.submit-zone__copy {
+    margin: 0 auto 22px;
+    max-width: 560px;
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.55;
+}
+.submit-zone__stats {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 14px;
+    margin: 0 0 26px;
+    padding: 10px 16px;
+    background: rgba(255,255,255,0.7);
+    border: 1px solid rgba(22,163,74,0.18);
+    border-radius: 999px;
+    font-size: 0.82rem;
+    color: #0f172a;
+    font-weight: 500;
+}
+.submit-zone__stats strong { color: #047857; font-weight: 700; }
+.submit-zone__stats .dot { color: rgba(15,23,42,0.25); }
 
 .action-submit {
     appearance: none;
     border: none;
     background: linear-gradient(135deg, #16a34a, #15803d);
     color: white;
-    padding: 14px 18px;
-    border-radius: 12px;
+    padding: 18px 44px;
+    border-radius: 14px;
     font: inherit;
-    font-size: 0.95rem;
+    font-size: 1.05rem;
     font-weight: 700;
     cursor: pointer;
-    box-shadow: 0 10px 24px rgba(22, 163, 74, 0.40);
+    box-shadow: 0 14px 28px rgba(22, 163, 74, 0.38);
     transition: filter 120ms, transform 120ms, box-shadow 200ms, background 200ms;
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 10px;
+    min-width: 260px;
 }
 .action-submit:hover {
     filter: brightness(1.08);
     transform: translateY(-2px);
-    box-shadow: 0 14px 30px rgba(22, 163, 74, 0.50);
+    box-shadow: 0 20px 36px rgba(22, 163, 74, 0.50);
 }
 .action-submit[disabled] {
     opacity: 0.78;
@@ -1462,7 +1531,7 @@ details.custom-section textarea.cs-body:focus {
 .action-submit.error   { background: linear-gradient(135deg, #dc2626, #991b1b); }
 .action-submit .spin {
     display: inline-block;
-    width: 13px; height: 13px;
+    width: 14px; height: 14px;
     border: 2px solid rgba(255,255,255,0.4);
     border-top-color: white;
     border-radius: 50%;
@@ -1470,45 +1539,26 @@ details.custom-section textarea.cs-body:focus {
 }
 @keyframes portal-spin { to { transform: rotate(360deg); } }
 
-.action-tools-mini {
-    display: flex;
-    gap: 4px;
-    justify-content: center;
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 5px;
-    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
-}
-.action-tools-mini button {
-    flex: 1;
-    background: transparent;
-    border: none;
-    color: var(--muted);
-    padding: 7px 6px;
-    font: inherit;
+.submit-zone__hint {
+    margin: 18px 0 0;
     font-size: 0.78rem;
-    font-weight: 500;
-    cursor: pointer;
-    border-radius: 7px;
-    transition: color 120ms, background 120ms;
+    color: var(--muted);
 }
-.action-tools-mini button:hover { color: var(--brand); background: var(--brand-soft); }
-.action-tools-mini button.danger:hover { color: var(--bad); background: rgba(220, 38, 38, 0.08); }
 
 @media print {
-    .portal-floating-actions { display: none !important; }
+    .portal-tools { display: none !important; }
+    .submit-zone { box-shadow: none; background: white; border-color: #ddd; }
+    .action-submit { display: none; }
 }
 @media (max-width: 720px) {
-    .portal-floating-actions {
+    .portal-tools {
         top: auto;
         bottom: 16px;
         right: 12px;
-        left: 12px;
-        width: auto;
     }
-    .action-submit { padding: 12px 16px; }
+    .submit-zone { margin: 40px 14px 32px; padding: 28px 20px; }
+    .submit-zone__title { font-size: 1.3rem; }
+    .action-submit { padding: 16px 28px; min-width: 0; width: 100%; }
 }
 
 /* --- Toast --- */
@@ -1532,7 +1582,7 @@ details.custom-section textarea.cs-body:focus {
 
 /* --- Print styles --- */
 @media print {
-    .portal-appbar, .portal-floating-actions, .portal-toast { display: none !important; }
+    .portal-appbar, .portal-tools, .portal-toast { display: none !important; }
     body { padding: 0 !important; max-width: none !important; }
     .page-body details { break-inside: avoid; box-shadow: none; border: 1px solid #ccc; }
     .page-body details, .page-body details details { background: white !important; }
@@ -1715,12 +1765,27 @@ details.custom-section textarea.cs-body:focus {
 <button id="btn-add-section" type="button">＋ Add new section</button>
 </section>
 
-<div aria-label="Review actions" class="portal-floating-actions" role="toolbar">
-<button class="action-submit" id="btn-submit" title="Email a filled-in HTML snapshot of this review to the project owner" type="button">📤 Submit review</button>
-<div class="action-tools-mini">
+<section aria-label="Submit review" class="submit-zone">
+<p class="submit-zone__eyebrow">Final step</p>
+<h2 class="submit-zone__title">Ready to send your review?</h2>
+<p class="submit-zone__copy">
+    Double-check the sections above, then submit. A complete HTML snapshot
+    of everything you filled in will be emailed to the project owner.
+  </p>
+<p aria-live="polite" class="submit-zone__stats" id="submit-zone-stats">
+<span><strong id="sz-stat-sections">0/0</strong> sections reviewed</span>
+<span class="dot">·</span>
+<span><strong id="sz-stat-required">0/0</strong> required fields filled</span>
+</p>
+<button class="action-submit" id="btn-submit" title="Email a filled-in HTML snapshot of this review to the project owner" type="button">
+    📤 Submit review
+  </button>
+<p class="submit-zone__hint">You can resubmit anytime — the latest one wins.</p>
+</section>
+
+<div aria-label="Review utilities" class="portal-tools" role="toolbar">
 <button id="btn-download" title="Download a JSON file of all your answers" type="button">⬇ JSON</button>
 <button class="danger" id="btn-clear" title="Delete your saved draft from this browser" type="button">🗑 Clear</button>
-</div>
 </div>
 <div class="portal-toast" id="portal-toast"></div>
 <script>
@@ -1872,6 +1937,20 @@ details.custom-section textarea.cs-body:focus {
             progressLabel.textContent = `${pct}%  (${done}/${total} sections complete)`;
         }
         updateRequiredPill();
+        updateSubmitZoneStats(done, total);
+    }
+
+    // Live numbers shown right above the big bottom Submit button, so
+    // the reviewer can see at a glance what they're about to send.
+    function updateSubmitZoneStats(sectionsDone, sectionsTotal) {
+        const secEl = document.getElementById("sz-stat-sections");
+        const reqEl = document.getElementById("sz-stat-required");
+        if (secEl) secEl.textContent = sectionsDone + "/" + sectionsTotal;
+        if (reqEl) {
+            const all = document.querySelectorAll('.editable-cell.required');
+            const filled = document.querySelectorAll('.editable-cell.required.filled-required').length;
+            reqEl.textContent = filled + "/" + all.length;
+        }
     }
 
     // Tracks every must-fill cell and reflects state in the appbar pill.
@@ -2348,7 +2427,7 @@ details.custom-section textarea.cs-body:focus {
 
         // Strip interactive chrome + every <script>. The snapshot is static.
         docClone.querySelectorAll(
-            '.portal-appbar, .portal-floating-actions, .portal-toast, ' +
+            '.portal-appbar, .portal-tools, .portal-toast, .submit-zone, ' +
             '#btn-add-section, .cs-remove, script'
         ).forEach(n => n.remove());
 
