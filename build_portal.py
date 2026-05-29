@@ -220,6 +220,47 @@ _OVERALL_LABEL_RE = re.compile(
 )
 
 
+def _own_descendants_filter(container: Tag) -> "callable":
+    """Returns a predicate that's True for descendants of ``container``
+    that are NOT inside any nested ``<details>`` of ``container``. Used
+    to attribute fields to the section that owns them rather than to
+    their ancestor."""
+    nested = [d for d in container.find_all("details") if d is not container]
+    nested_ids: set[int] = set()
+    for nd in nested:
+        nested_ids.add(id(nd))
+        for c in nd.descendants:
+            nested_ids.add(id(c))
+
+    def is_own(tag: Tag) -> bool:
+        return id(tag) not in nested_ids
+
+    return is_own
+
+
+def _leaf_has_review_pairs(leaf: Tag) -> bool:
+    """A section needs an "All correct / I have corrections" verdict pill
+    only if it actually has per-row review radios to auto-tick. Sections
+    that are 100% required-fill (must-be-filled URLs, open answer
+    textareas, …) have nothing to "review" and the verdict is meaningless
+    noise. This returns True iff ``leaf`` directly owns at least one
+    ``.review-cell``."""
+    is_own = _own_descendants_filter(leaf)
+    for rc in leaf.find_all(class_="review-cell"):
+        if is_own(rc):
+            return True
+    return False
+
+
+def _leaf_has_required_cells(leaf: Tag) -> bool:
+    is_own = _own_descendants_filter(leaf)
+    for cell in leaf.find_all(class_="editable-cell"):
+        classes = cell.get("class") or []
+        if "required" in classes and is_own(cell):
+            return True
+    return False
+
+
 def convert_section_verdicts(soup: BeautifulSoup) -> int:
     """Find every "Overall review status …" intro paragraph and replace it
     (plus the 3 following Notion to-do-list ULs) with a single 2-option
@@ -252,17 +293,21 @@ def convert_section_verdicts(soup: BeautifulSoup) -> int:
         if len(todo_wrappers) < 2:
             continue  # Pattern doesn't match — leave alone.
 
-        verdict_block, verdict_id = build_verdict_widget(section_label)
-        wrapper.replace_with(verdict_block)
-        for sib in todo_wrappers:
-            sib.decompose()
+        # Find the enclosing leaf BEFORE we mutate anything, so we can
+        # decide whether a verdict pill is actually needed here.
+        leaf = wrapper.find_parent("details")
+        needs_verdict = leaf is not None and _leaf_has_review_pairs(leaf)
 
-        leaf = verdict_block.find_parent("details")
-        if leaf is not None:
+        if needs_verdict:
+            verdict_block, verdict_id = build_verdict_widget(section_label)
+            wrapper.replace_with(verdict_block)
+            for sib in todo_wrappers:
+                sib.decompose()
+
             # The original "Overall review status" prompt lived at the BOTTOM
             # of the section. We want the verdict pill to be the first thing
             # the reviewer sees, so hoist it to the top of the section's
-            # indented content area (same place as injected verdicts).
+            # indented content area.
             verdict_block.extract()
             indented = leaf.find("div", class_="indented", recursive=False)
             summary = leaf.find("summary", recursive=False)
@@ -273,9 +318,23 @@ def convert_section_verdicts(soup: BeautifulSoup) -> int:
             else:
                 leaf.insert(0, verdict_block)
             leaf["data-section-id"] = verdict_id
+            leaf["data-verdict-name"] = verdict_id
             if section_label:
                 leaf["data-section-label"] = section_label
-        converted += 1
+            converted += 1
+        else:
+            # No review pairs here → an "All correct" pill is meaningless.
+            # Strip the Notion prompt + its 3 to-do lists so they don't
+            # linger as dead UI, and tag the leaf as trackable (so its
+            # required fields still count toward progress) without a
+            # verdict.
+            wrapper.decompose()
+            for sib in todo_wrappers:
+                sib.decompose()
+            if leaf is not None and not leaf.get("data-section-id"):
+                leaf["data-section-id"] = next_field_id("section")
+                if section_label:
+                    leaf["data-section-label"] = section_label
     return converted
 
 
@@ -321,6 +380,36 @@ def remove_sections_by_label(soup: BeautifulSoup, labels: list[str]) -> int:
             details.decompose()
             removed += 1
     return removed
+
+
+def add_section_counters(soup: BeautifulSoup) -> int:
+    """Append a placeholder counter pill (``<span class="section-counter">``)
+    to every ``<details>``'s summary so the reviewer can see "answered /
+    total" at a glance — especially when the section is collapsed.
+
+    Initial text is "…"; the inline JS fills it on load and refreshes on
+    every change. We render the span via Python (rather than injecting
+    it from JS on DOMContentLoaded) so the layout doesn't pop in.
+    """
+    added = 0
+    for details in soup.find_all("details"):
+        summary = details.find("summary", recursive=False)
+        if summary is None:
+            continue
+        if summary.find("span", class_="section-counter") is not None:
+            continue
+        counter = _new_tag(
+            "span",
+            {
+                "class": "section-counter",
+                "data-section-counter": "true",
+                "hidden": "hidden",
+            },
+        )
+        counter.string = "…"
+        summary.append(counter)
+        added += 1
+    return added
 
 
 def collapse_all_details(soup: BeautifulSoup) -> int:
@@ -395,20 +484,27 @@ def inject_verdicts_into_remaining_leaves(soup: BeautifulSoup) -> int:
 
         summary = details.find("summary", recursive=False)
         section_label = summary.get_text(" ", strip=True) if summary else None
-        verdict_block, verdict_id = build_verdict_widget(section_label)
 
-        indented = details.find("div", class_="indented", recursive=False)
-        if indented is not None:
-            indented.insert(0, verdict_block)
-        elif summary is not None:
-            summary.insert_after(verdict_block)
+        if _leaf_has_review_pairs(details):
+            verdict_block, verdict_id = build_verdict_widget(section_label)
+            indented = details.find("div", class_="indented", recursive=False)
+            if indented is not None:
+                indented.insert(0, verdict_block)
+            elif summary is not None:
+                summary.insert_after(verdict_block)
+            else:
+                details.insert(0, verdict_block)
+            details["data-section-id"] = verdict_id
+            details["data-verdict-name"] = verdict_id
+            if section_label:
+                details["data-section-label"] = section_label
+            injected += 1
         else:
-            details.insert(0, verdict_block)
-
-        details["data-section-id"] = verdict_id
-        if section_label:
-            details["data-section-label"] = section_label
-        injected += 1
+            # Track this section (so progress counts its required fields)
+            # but don't bolt on a meaningless verdict.
+            details["data-section-id"] = next_field_id("section")
+            if section_label:
+                details["data-section-label"] = section_label
     return injected
 
 
@@ -616,6 +712,9 @@ def transform(soup: BeautifulSoup) -> dict:
     stats["sections_removed"] = remove_sections_by_label(
         soup, ["9.6 Language & accessibility"]
     )
+    # Counter pills must be added AFTER pruning so we don't emit counters
+    # on sections we're about to delete.
+    stats["counter_pills_added"] = add_section_counters(soup)
     stats["details_collapsed"] = collapse_all_details(soup)
 
     return stats
@@ -1120,6 +1219,48 @@ details[data-verdict-state="incorrect"] > summary::after {
 }
 details[data-verdict-state="correct"]   > summary::after { content: "  ✓ approved"; color: var(--ok); }
 details[data-verdict-state="incorrect"] > summary::after { content: "  ✎ has corrections"; color: var(--bad); }
+
+/* --- Per-section answered/total counter pill --------------------------- */
+/* Appended to every <summary> at build time. Stays visible whether the
+   section is collapsed or expanded so the reviewer can see at a glance
+   how much they have left. */
+.section-counter {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 10px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #e2e8f0;
+    vertical-align: middle;
+    user-select: none;
+    transition: background 160ms, color 160ms, border-color 160ms;
+}
+.section-counter[hidden] { display: none !important; }
+.section-counter.counter-empty {
+    background: #f1f5f9;
+    color: #64748b;
+    border-color: #e2e8f0;
+}
+.section-counter.counter-partial {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fde68a;
+}
+.section-counter.counter-done {
+    background: #dcfce7;
+    color: #166534;
+    border-color: #bbf7d0;
+}
+.section-counter.counter-done::before { content: "✓ "; }
+@media print {
+    .section-counter { display: none !important; }
+}
 
 /* --- Embassy notes block --- */
 .embassy-notes-block {
@@ -1662,11 +1803,17 @@ PORTAL_JS = r"""
     }
 
     function sectionVerdict(detailsEl) {
-        // The verdict input that's a direct OWN child of this details (not in a nested section).
-        const verdictId = detailsEl.getAttribute('data-section-id');
-        if (!verdictId) return null;
-        const checked = detailsEl.querySelector(`input[type="radio"][name="${CSS.escape(verdictId)}"]:checked`);
+        // A trackable section now MIGHT not have a verdict pill at all
+        // (purely required-fill sections skip it because "All correct"
+        // would be meaningless there).
+        const verdictName = detailsEl.getAttribute('data-verdict-name');
+        if (!verdictName) return null;
+        const checked = detailsEl.querySelector(`input[type="radio"][name="${CSS.escape(verdictName)}"]:checked`);
         return checked ? checked.value : null;
+    }
+
+    function sectionHasVerdict(detailsEl) {
+        return detailsEl.hasAttribute('data-verdict-name');
     }
 
     // A section counts as "complete" only when a verdict is set AND every
@@ -1679,9 +1826,15 @@ PORTAL_JS = r"""
     }
 
     function isSectionComplete(detailsEl) {
-        if (!sectionVerdict(detailsEl)) return false;
         const required = ownRequiredCells(detailsEl);
-        return required.every(c => c.classList.contains('filled-required'));
+        const requiredOk = required.every(c => c.classList.contains('filled-required'));
+        if (sectionHasVerdict(detailsEl)) {
+            return sectionVerdict(detailsEl) !== null && requiredOk;
+        }
+        // Verdict-less section: complete iff every owned required field
+        // is filled. (A section with NO required fields and no verdict
+        // is purely informational — treat it as already complete.)
+        return required.length === 0 ? true : requiredOk;
     }
 
     function updateProgress() {
@@ -1696,6 +1849,58 @@ PORTAL_JS = r"""
         }
         updateRequiredPill();
         updateSubmitZoneStats(done, total);
+        recomputeSectionCounters();
+    }
+
+    // Per-section "X / Y answered" pill on every <summary>. Aggregates
+    // every trackable input inside the section (including descendants
+    // of nested sub-sections — that's the point: when the parent is
+    // collapsed it shows the rollup).
+    //
+    //   answered = filled required + reviewed pairs + picked verdicts
+    //   total    = required + review-pairs + verdicts
+    function recomputeSectionCounters() {
+        document.querySelectorAll('details').forEach(d => {
+            const counter = d.querySelector(':scope > summary > .section-counter');
+            if (!counter) return;
+
+            let total = 0;
+            let answered = 0;
+
+            // (a) Section verdicts (dedupe by name — each pair shares one).
+            const verdictNames = new Set();
+            d.querySelectorAll('input[type="radio"][data-verdict="true"]')
+                .forEach(r => { if (r.name) verdictNames.add(r.name); });
+            verdictNames.forEach(name => {
+                total++;
+                if (d.querySelector(
+                    `input[type="radio"][data-verdict="true"][name="${CSS.escape(name)}"]:checked`
+                )) answered++;
+            });
+
+            // (b) Per-row review pairs.
+            d.querySelectorAll('.review-cell').forEach(rc => {
+                total++;
+                if (rc.querySelector('input[type="radio"]:checked')) answered++;
+            });
+
+            // (c) Required-fill cells (must-be-filled URLs / textareas).
+            d.querySelectorAll('.editable-cell.required').forEach(rc => {
+                total++;
+                const input = rc.querySelector('textarea, input');
+                if (input && input.value.trim() !== '') answered++;
+            });
+
+            if (total === 0) {
+                counter.hidden = true;
+                return;
+            }
+            counter.hidden = false;
+            counter.textContent = answered + '/' + total + ' answered';
+            counter.classList.toggle('counter-done',    answered === total);
+            counter.classList.toggle('counter-empty',   answered === 0);
+            counter.classList.toggle('counter-partial', answered > 0 && answered < total);
+        });
     }
 
     // Live numbers shown right above the big bottom Submit button, so
@@ -1813,7 +2018,9 @@ PORTAL_JS = r"""
     }
 
     function refreshAllVerdictStates() {
-        allSectionEls().forEach(applyVerdictStateToSection);
+        // Explicit arrow so the index isn't accidentally passed as
+        // ``userInitiated`` (truthy for every section after the first).
+        allSectionEls().forEach(el => applyVerdictStateToSection(el, false));
     }
 
     // ---- Toast ----
