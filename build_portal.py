@@ -361,6 +361,81 @@ def remove_table_of_contents(soup: BeautifulSoup) -> int:
     return removed
 
 
+def rewrite_intro_steps(soup: BeautifulSoup) -> dict:
+    """Tidy the "How to complete this workbook" intro:
+
+      * Drop the slightly accusatory closing line "Anything left
+        untouched will be assumed accurate as written."
+      * Add a friendly final step explaining that pressing Submit emails
+        the completed review to the project manager.
+
+    Notion renders each numbered step as its own
+    ``<div style="display:contents"><ol class="numbered-list" start="N">
+    <li>…</li></ol></div>`` block, so we clone that exact shape for the
+    new step to keep the styling identical.
+    """
+    result = {"sentence_removed": 0, "step_added": 0}
+
+    # 1) Remove the closing sentence (and its empty wrapper).
+    needle = "left untouched will be assumed accurate"
+    for p in list(soup.find_all("p")):
+        if needle in p.get_text(strip=True).lower():
+            wrapper = p.parent
+            p.decompose()
+            if wrapper is not None and not wrapper.get_text(strip=True):
+                wrapper.decompose()
+            result["sentence_removed"] += 1
+
+    # 2) Append a new numbered step after the last existing step.
+    last_ol = None
+    last_start = 0
+    for ol in soup.find_all("ol", class_="numbered-list"):
+        # Only consider the intro steps: their <li> text matches the
+        # known wording. The "Replace every dummy link" step is last.
+        if "dummy link" in ol.get_text(" ", strip=True).lower():
+            last_ol = ol
+            try:
+                last_start = int(ol.get("start", "1"))
+            except ValueError:
+                last_start = 1
+            break
+
+    if last_ol is not None:
+        outer = last_ol.parent  # the display:contents wrapper div
+        new_wrapper = _new_tag("div", {"dir": "auto", "style": "display:contents"})
+        new_ol = _new_tag(
+            "ol",
+            {
+                "class": ["numbered-list"],
+                "start": str(last_start + 1),
+                "type": "1",
+            },
+        )
+        new_li = _new_tag("li", {})
+        # Build: "When you've finished, press **Submit review** at the
+        #         bottom — an automatic email will be sent to the project
+        #         manager to update the chatbot."
+        new_li.append(NavigableString("When you've finished, press "))
+        strong = _new_tag("strong", {})
+        strong.string = "Submit review"
+        new_li.append(strong)
+        new_li.append(
+            NavigableString(
+                " at the bottom of the page — an automatic email is then "
+                "sent to the project manager to update the chatbot."
+            )
+        )
+        new_ol.append(new_li)
+        new_wrapper.append(new_ol)
+        if outer is not None:
+            outer.insert_after(new_wrapper)
+        else:
+            last_ol.insert_after(new_wrapper)
+        result["step_added"] = 1
+
+    return result
+
+
 def remove_sections_by_label(soup: BeautifulSoup, labels: list[str]) -> int:
     """Decompose every <details> whose label / summary text matches one
     of the given labels (case-insensitive, ``in`` match). Used to drop
@@ -709,6 +784,7 @@ def transform(soup: BeautifulSoup) -> dict:
     # remaining <details> closed by default so the reviewer drills in
     # one section at a time.
     stats["toc_removed"] = remove_table_of_contents(soup)
+    stats["intro_steps"] = rewrite_intro_steps(soup)
     stats["sections_removed"] = remove_sections_by_label(
         soup, ["9.6 Language & accessibility"]
     )
