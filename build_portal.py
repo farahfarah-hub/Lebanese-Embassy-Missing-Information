@@ -1116,22 +1116,6 @@ input.review-url.filled {
     background: #f7fef9;
 }
 
-/* Required rows ignore the "all correct" dimming — the reviewer still has
-   to provide the real value even after approving the section. */
-.editable-cell.required.verdict-dimmed,
-.editable-cell.must-fill-marker.verdict-dimmed {
-    opacity: 1 !important;
-}
-.editable-cell.required.verdict-dimmed textarea,
-.editable-cell.required.verdict-dimmed input {
-    pointer-events: auto !important;
-    filter: none !important;
-}
-.editable-cell.required.verdict-dimmed::after,
-.editable-cell.must-fill-marker.verdict-dimmed::after {
-    content: none !important;
-}
-
 /* --- Radio pill group --- */
 .radio-group {
     display: flex;
@@ -1258,30 +1242,39 @@ input.review-url.filled {
     box-shadow: 0 4px 14px rgba(220, 38, 38, 0.18);
 }
 
-/* When a section is marked "All correct", dim the per-row review pills and
-   correction textareas inside it — reviewers don't need to tick each row.
-   The dimming is scoped by JS to the leaf section only, so a parent marked
-   correct never overrides a child's own verdict. */
-/* When a section is marked "All correct" we both VISUALLY mark the
-   per-row controls as dimmed AND programmatically check the ✅ Correct
-   radio in each row. Keep the dimming SUBTLE so the freshly-ticked
-   green pills are clearly visible (the previous 0.45 opacity +
-   grayscale filter washed them out and made the auto-tick look like
-   it hadn't fired). */
-.editable-cell.verdict-dimmed { opacity: 0.92; }
-.editable-cell.verdict-dimmed .radio-group,
-.editable-cell.verdict-dimmed textarea,
-.editable-cell.verdict-dimmed input {
-    pointer-events: none;
+/* --- Open questions --------------------------------------------------------
+   Standalone "please tell us X" answer cells that are NOT tied to a
+   Correct/Incorrect review row. The section verdict (All correct / I have
+   corrections) never touches these — they must always be answered by the
+   reviewer. We give them an amber "answer needed" accent that flips to a
+   green "answered" once filled, so they can't be skipped after a section
+   is marked all-correct. */
+.editable-cell.open-question {
+    border-left: 3px solid #f59e0b;
 }
-.editable-cell.verdict-dimmed::after {
-    content: "✓ auto-approved";
+.editable-cell.open-question textarea,
+.editable-cell.open-question input {
+    pointer-events: auto !important;   /* never lockable by any verdict state */
+}
+.editable-cell.open-question::before {
+    content: "✍️ Answer needed";
     display: block;
-    font-size: 0.7rem;
-    color: var(--ok);
-    margin-top: 4px;
-    font-style: italic;
-    font-weight: 600;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: #b45309;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+}
+.editable-cell.open-question.answered {
+    border-left-color: #16a34a;
+}
+.editable-cell.open-question.answered::before {
+    content: "✓ Answered";
+    color: #15803d;
+}
+@media print {
+    .editable-cell.open-question::before { content: "Answer:"; color: #555; }
 }
 
 /* Subtle "completed" tint on the whole leaf section once a verdict is set. */
@@ -2191,10 +2184,29 @@ PORTAL_JS = r"""
         setTimeout(() => toastEl.classList.remove("show"), 1800);
     }
 
+    // Tag standalone "open question" answer cells so we can both style
+    // them and guarantee the verdict auto-correct never touches them.
+    // An open question is a textarea answer cell that is NOT paired with
+    // a Correct/Incorrect review row and is NOT a required field — it's a
+    // free "please tell us X" prompt the reviewer must answer regardless
+    // of the section verdict.
+    function markOpenQuestions() {
+        document.querySelectorAll('.editable-cell.textarea-cell').forEach(cell => {
+            if (cell.classList.contains('required')) return;
+            const row = cell.closest('tr');
+            if (row && row.querySelector('.review-cell')) return;  // paired correction, not an open Q
+            cell.classList.add('open-question');
+        });
+    }
+
     // ---- Filled marker for textareas / urls ----
     function markFilled(el) {
-        if (el.value && el.value.trim() !== "") el.classList.add("filled");
-        else el.classList.remove("filled");
+        const filled = !!(el.value && el.value.trim() !== "");
+        el.classList.toggle("filled", filled);
+        // Reflect answered/unanswered state on the open-question cell so
+        // its "answer needed" cue flips to "answered".
+        const oq = el.closest && el.closest('.editable-cell.open-question');
+        if (oq) oq.classList.toggle('answered', filled);
     }
 
     // ---- Build a structured report for download ----
@@ -2724,6 +2736,7 @@ PORTAL_JS = r"""
     // ---- Wire up ----
     document.addEventListener("DOMContentLoaded", () => {
         load();
+        markOpenQuestions();
         document.querySelectorAll('textarea, input[type="url"]').forEach(markFilled);
         updateRequiredFilledState();
         refreshAllVerdictStates();
