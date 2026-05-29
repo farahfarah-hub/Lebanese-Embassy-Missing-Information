@@ -1799,7 +1799,62 @@ PORTAL_JS = r"""
 
     // ---- Section-level progress ----
     function allSectionEls() {
-        return Array.from(document.querySelectorAll('details[data-section-id]'));
+        // Only return sections that actually have something for the
+        // reviewer to do. Otherwise pure-informational sections were
+        // being counted as "instantly complete" and inflating the
+        // progress bar on a freshly-cleared page (was showing 11% on
+        // load — see git history).
+        return Array.from(document.querySelectorAll('details[data-section-id]'))
+            .filter(d => countItems(d, 'own').total > 0);
+    }
+
+    // Single source of truth for "what counts as a trackable item in
+    // this section". Used by both the global progress bar AND the
+    // per-summary "X/Y answered" counter pill, so the two can never
+    // disagree.
+    //
+    // scope = 'own'  → only items that belong directly to this section
+    //                  (skip everything inside a nested sub-section).
+    // scope = 'all'  → include nested sub-sections (parent rollup).
+    //
+    // Trackable items: section verdict (1 per name), every review-cell
+    // pair, every editable-cell (required or optional textarea / URL).
+    // Embassy-notes blocks and custom-section bodies are intentionally
+    // NOT tracked — they're free-form notes, not answers.
+    function countItems(detailsEl, scope) {
+        let nested = [];
+        if (scope === 'own') {
+            nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
+        }
+        const inScope = el => !nested.some(n => n.contains(el));
+
+        let total = 0, answered = 0;
+
+        const verdictNames = new Set();
+        detailsEl.querySelectorAll('input[type="radio"][data-verdict="true"]').forEach(r => {
+            if (r.name && inScope(r)) verdictNames.add(r.name);
+        });
+        verdictNames.forEach(name => {
+            total++;
+            if (detailsEl.querySelector(
+                `input[type="radio"][data-verdict="true"][name="${CSS.escape(name)}"]:checked`
+            )) answered++;
+        });
+
+        detailsEl.querySelectorAll('.editable-cell.review-cell').forEach(rc => {
+            if (!inScope(rc)) return;
+            total++;
+            if (rc.querySelector('input[type="radio"]:checked')) answered++;
+        });
+
+        detailsEl.querySelectorAll('.editable-cell:not(.review-cell)').forEach(ec => {
+            if (!inScope(ec)) return;
+            total++;
+            const input = ec.querySelector('textarea, input');
+            if (input && input.value.trim() !== '') answered++;
+        });
+
+        return { total, answered };
     }
 
     function sectionVerdict(detailsEl) {
@@ -1826,15 +1881,13 @@ PORTAL_JS = r"""
     }
 
     function isSectionComplete(detailsEl) {
-        const required = ownRequiredCells(detailsEl);
-        const requiredOk = required.every(c => c.classList.contains('filled-required'));
-        if (sectionHasVerdict(detailsEl)) {
-            return sectionVerdict(detailsEl) !== null && requiredOk;
-        }
-        // Verdict-less section: complete iff every owned required field
-        // is filled. (A section with NO required fields and no verdict
-        // is purely informational — treat it as already complete.)
-        return required.length === 0 ? true : requiredOk;
+        // Single rule: a section is complete iff every trackable item
+        // it owns has been answered. No more special-casing verdict vs
+        // required vs informational sections — they all flow through
+        // countItems(). This way the global bar can never disagree with
+        // the per-summary pill.
+        const { total, answered } = countItems(detailsEl, 'own');
+        return total > 0 && answered === total;
     }
 
     function updateProgress() {
@@ -1852,44 +1905,15 @@ PORTAL_JS = r"""
         recomputeSectionCounters();
     }
 
-    // Per-section "X / Y answered" pill on every <summary>. Aggregates
-    // every trackable input inside the section (including descendants
-    // of nested sub-sections — that's the point: when the parent is
-    // collapsed it shows the rollup).
-    //
-    //   answered = filled required + reviewed pairs + picked verdicts
-    //   total    = required + review-pairs + verdicts
+    // Per-section "X/Y answered" pill on every <summary>. Uses the
+    // SAME countItems() helper as the global progress, with scope='all'
+    // so parent sections show the rollup of their nested children.
     function recomputeSectionCounters() {
         document.querySelectorAll('details').forEach(d => {
             const counter = d.querySelector(':scope > summary > .section-counter');
             if (!counter) return;
 
-            let total = 0;
-            let answered = 0;
-
-            // (a) Section verdicts (dedupe by name — each pair shares one).
-            const verdictNames = new Set();
-            d.querySelectorAll('input[type="radio"][data-verdict="true"]')
-                .forEach(r => { if (r.name) verdictNames.add(r.name); });
-            verdictNames.forEach(name => {
-                total++;
-                if (d.querySelector(
-                    `input[type="radio"][data-verdict="true"][name="${CSS.escape(name)}"]:checked`
-                )) answered++;
-            });
-
-            // (b) Per-row review pairs.
-            d.querySelectorAll('.review-cell').forEach(rc => {
-                total++;
-                if (rc.querySelector('input[type="radio"]:checked')) answered++;
-            });
-
-            // (c) Required-fill cells (must-be-filled URLs / textareas).
-            d.querySelectorAll('.editable-cell.required').forEach(rc => {
-                total++;
-                const input = rc.querySelector('textarea, input');
-                if (input && input.value.trim() !== '') answered++;
-            });
+            const { total, answered } = countItems(d, 'all');
 
             if (total === 0) {
                 counter.hidden = true;
