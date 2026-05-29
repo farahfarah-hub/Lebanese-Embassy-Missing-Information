@@ -1925,9 +1925,30 @@ PORTAL_JS = r"""
 
         detailsEl.querySelectorAll('.editable-cell:not(.review-cell)').forEach(ec => {
             if (!inScope(ec)) return;
-            total++;
+
+            // Skip cells that hold no input at all — e.g. the "Must be
+            // filled" badge cell that sits next to a required URL input.
+            // It's a label, not a question, so it must never inflate the
+            // denominator.
             const input = ec.querySelector('textarea, input');
-            if (input && input.value.trim() !== '') answered++;
+            if (!input) return;
+
+            const isRequired = ec.classList.contains('required');
+
+            // Skip the OPTIONAL "Correction / Official Information"
+            // textarea that's paired with a review row. The reviewer only
+            // fills it when they mark that row Incorrect, so it's not a
+            // separate mandatory question — counting it made fully-ticked
+            // sections read like "8/15". Required cells (dummy links,
+            // must-fill fields) and standalone open-answer textareas
+            // (e.g. §9.x) are still counted.
+            if (!isRequired) {
+                const row = ec.closest('tr');
+                if (row && row.querySelector('.review-cell')) return;
+            }
+
+            total++;
+            if (input.value.trim() !== '') answered++;
         });
 
         return { total, answered };
