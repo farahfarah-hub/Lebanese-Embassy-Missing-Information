@@ -2155,48 +2155,51 @@ details.custom-section textarea.cs-body:focus {
         setTimeout(() => pill.classList.remove('verdict-autotick-flash'), 750);
     }
 
+    // Returns the per-row review radios that belong directly to this
+    // section (not to a nested sub-section, and not the verdict pill
+    // itself, and not custom-option radios whose values aren't ✅/❌).
+    function ownReviewRadios(detailsEl) {
+        const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
+        const isOwn = el => !nested.some(n => n.contains(el));
+        return Array.from(detailsEl.querySelectorAll('input[type="radio"]'))
+            .filter(r => r.dataset.verdict !== 'true')
+            .filter(isOwn);
+    }
+
+    function ownReviewCells(detailsEl) {
+        const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
+        const isOwn = el => !nested.some(n => n.contains(el));
+        return Array.from(detailsEl.querySelectorAll('.editable-cell.review-cell')).filter(isOwn);
+    }
+
+    // VERDICT → ROWS (only on an explicit click of the verdict pill).
+    // Updates the summary tint via data-verdict-state, and — as a
+    // convenience — bulk-sets the per-row radios. Row mutation is gated
+    // on userInitiated so that deriving the verdict FROM the rows (or
+    // restoring on load) can never clobber the reviewer's own answers.
     function applyVerdictStateToSection(detailsEl, userInitiated) {
         const verdict = sectionVerdict(detailsEl);
         if (verdict) detailsEl.setAttribute('data-verdict-state', verdict);
         else detailsEl.removeAttribute('data-verdict-state');
 
-        const nested = Array.from(detailsEl.querySelectorAll(':scope details[data-section-id]'));
-        const isOwn = el => !nested.some(n => n.contains(el));
+        if (!userInitiated) return;
 
-        // (a) Visual dimming
-        Array.from(detailsEl.querySelectorAll('.editable-cell'))
-            .filter(isOwn)
-            .forEach(c => {
-                if (verdict === 'correct') c.classList.add('verdict-dimmed');
-                else c.classList.remove('verdict-dimmed');
-            });
-
-        // (b) Auto-tick / un-auto-tick the per-row "✅ Correct" radios.
-        // Filter to the actual review-pair radios — exclude the section
-        // verdict itself, exclude custom-option radios like
-        // "Same flow / Separate flow" (their values don't start with ✅),
-        // and never reach into nested sub-sections.
-        const ownReviewRadios = Array.from(detailsEl.querySelectorAll('input[type="radio"]'))
-            .filter(r => r.dataset.verdict !== 'true')
-            .filter(isOwn);
-
+        const radios = ownReviewRadios(detailsEl);
         if (verdict === 'correct') {
-            ownReviewRadios
+            // Shortcut: mark every review row "✅ Correct".
+            radios
                 .filter(r => r.value && r.value.indexOf('✅') === 0)
                 .forEach(r => {
                     const wasChecked = r.checked;
                     r.checked = true;
                     r.dataset.autoFromVerdict = 'true';
-                    // Flash the pill ONLY when (1) the reviewer just clicked
-                    // the verdict (not on initial load) and (2) the radio
-                    // actually transitioned from unchecked → checked. This
-                    // gives unambiguous "yes the auto-tick fired" feedback.
-                    if (userInitiated && !wasChecked) {
-                        flashPill(r.closest('.radio-pill'));
-                    }
+                    if (!wasChecked) flashPill(r.closest('.radio-pill'));
                 });
-        } else {
-            ownReviewRadios
+        } else if (verdict === 'incorrect') {
+            // Release ONLY the rows we auto-ticked, so the reviewer can
+            // now pick which ones are actually wrong. Rows they set by
+            // hand are left untouched.
+            radios
                 .filter(r => r.dataset.autoFromVerdict === 'true')
                 .forEach(r => {
                     r.checked = false;
@@ -2205,10 +2208,46 @@ details.custom-section textarea.cs-body:focus {
         }
     }
 
+    // ROWS → VERDICT. Once every review row in a section has an answer,
+    // set the section verdict automatically:
+    //   • all rows "✅ Correct"      → "All correct — no edits needed"
+    //   • at least one "❌ Incorrect" → "I have corrections / answers below"
+    // Does nothing until ALL rows are answered, and never mutates the
+    // rows themselves (so no feedback loop with the function above).
+    function deriveVerdictFromRows(detailsEl) {
+        if (!sectionHasVerdict(detailsEl)) return;
+
+        const cells = ownReviewCells(detailsEl);
+        if (cells.length === 0) return;
+
+        const allAnswered = cells.every(c => c.querySelector('input[type="radio"]:checked'));
+        if (!allAnswered) return;
+
+        const anyIncorrect = cells.some(c => {
+            const checked = c.querySelector('input[type="radio"]:checked');
+            return checked && checked.value.indexOf('✅') !== 0;
+        });
+        const target = anyIncorrect ? 'incorrect' : 'correct';
+        if (sectionVerdict(detailsEl) === target) return;  // already correct
+
+        const verdictName = detailsEl.getAttribute('data-verdict-name');
+        const radio = detailsEl.querySelector(
+            `input[type="radio"][data-verdict="true"][name="${CSS.escape(verdictName)}"][value="${target}"]`
+        );
+        if (radio) {
+            radio.checked = true;            // programmatic → no change event
+            flashPill(radio.closest('.verdict-pill'));
+            applyVerdictStateToSection(detailsEl, /*userInitiated*/false);  // refresh tint only
+        }
+    }
+
     function refreshAllVerdictStates() {
         // Explicit arrow so the index isn't accidentally passed as
         // ``userInitiated`` (truthy for every section after the first).
-        allSectionEls().forEach(el => applyVerdictStateToSection(el, false));
+        allSectionEls().forEach(el => {
+            deriveVerdictFromRows(el);
+            applyVerdictStateToSection(el, false);
+        });
     }
 
     // ---- Toast ----
@@ -2771,9 +2810,18 @@ details.custom-section textarea.cs-body:focus {
         });
         document.body.addEventListener("change", (e) => {
             const t = e.target;
-            if (t && t.dataset && t.dataset.verdict === "true") {
+            if (t && t.matches && t.matches('input[type="radio"]')) {
                 const sec = t.closest('details[data-section-id]');
-                if (sec) applyVerdictStateToSection(sec, /*userInitiated*/true);
+                if (sec) {
+                    if (t.dataset.verdict === "true") {
+                        // Reviewer clicked the verdict pill → drive the rows.
+                        applyVerdictStateToSection(sec, /*userInitiated*/true);
+                    } else {
+                        // Reviewer ticked a per-row Correct/Incorrect →
+                        // derive the section verdict once all rows are in.
+                        deriveVerdictFromRows(sec);
+                    }
+                }
             }
             scheduleSave();
             updateProgress();
