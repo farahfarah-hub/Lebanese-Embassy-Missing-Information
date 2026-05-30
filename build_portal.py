@@ -611,6 +611,56 @@ def dedup_workbook(soup: BeautifulSoup) -> dict:
     return stats
 
 
+_SUBNUM_RE = re.compile(r"^(\s*)\d+\.\d+")
+_TOPNUM_RE = re.compile(r"^(\s*)\d+\.(?!\d)")
+
+
+def _renumber_summary_text(summary: Tag, new_prefix: str, is_top: bool) -> bool:
+    """Replace the leading "N." / "N.M" number in a summary's title text
+    with ``new_prefix``, leaving the rest of the title (and the appended
+    counter pill) untouched."""
+    rx = _TOPNUM_RE if is_top else _SUBNUM_RE
+    for node in summary.descendants:
+        if isinstance(node, NavigableString):
+            txt = str(node)
+            m = rx.match(txt)
+            if m:
+                node.replace_with(NavigableString(rx.sub(m.group(1) + new_prefix, txt, count=1)))
+                return True
+    return False
+
+
+def renumber_sections(soup: BeautifulSoup) -> int:
+    """Re-sequence all section numbers after removals so there are no gaps
+    (e.g. removing §1.2 must turn "1.1, 1.3" back into "1.1, 1.2", and
+    removing §9.3/§9.6 must turn "9.1, 9.2, 9.4, 9.5" into "9.1 … 9.4").
+
+    Top-level chapters become 1..N in document order; each chapter's direct
+    sub-sections become N.1, N.2, … Deeper levels (e.g. the A–F passport
+    scenarios under 3.1) use letters, not numbers, so they're left alone.
+    Idempotent — safe to run on every build."""
+    fixed = 0
+    tops = [d for d in soup.find_all("details") if d.find_parent("details") is None]
+    for i, top in enumerate(tops, start=1):
+        sm = top.find("summary", recursive=False)
+        if sm and _renumber_summary_text(sm, f"{i}.", is_top=True):
+            fixed += 1
+        subs = [c for c in top.find_all("details") if c.find_parent("details") is top]
+        for j, sub in enumerate(subs, start=1):
+            new = f"{i}.{j}"
+            ssm = sub.find("summary", recursive=False)
+            if ssm and _renumber_summary_text(ssm, new, is_top=False):
+                fixed += 1
+            # Keep any number embedded in data-section-label in sync (it's
+            # surfaced in the emailed report).
+            lbl = sub.get("data-section-label")
+            if lbl:
+                newlbl = _SUBNUM_RE.sub(new, lbl, count=1)
+                if newlbl != lbl:
+                    sub["data-section-label"] = newlbl
+    return fixed
+
+
 def add_section_counters(soup: BeautifulSoup) -> int:
     """Append a placeholder counter pill (``<span class="section-counter">``)
     to every ``<details>``'s summary so the reviewer can see "answered /
@@ -950,6 +1000,8 @@ def transform(soup: BeautifulSoup) -> dict:
             "10. Summary of dummy links",        # links already asked throughout
         ],
     )
+    # Re-sequence section numbers so removals don't leave gaps (1.1, 1.3 → 1.1, 1.2).
+    stats["sections_renumbered"] = renumber_sections(soup)
     # Counter pills must be added AFTER pruning so we don't emit counters
     # on sections we're about to delete.
     stats["counter_pills_added"] = add_section_counters(soup)
