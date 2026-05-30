@@ -582,6 +582,17 @@ def dedup_workbook(soup: BeautifulSoup) -> dict:
         soup, "2.1 Birth", ["is the document list complete and correct"]
     )
 
+    # 2.5 — "additional documents" duplicates the Required documents review row,
+    # and the emergency-phone question is covered by the existing email row.
+    stats["transport_qs"] = remove_open_questions(
+        soup,
+        "2.5 Transportation",
+        [
+            "are there any additional documents",
+            "is there a specific phone number for emergencies",
+        ],
+    )
+
     # Item 5 — 3.6 asks the service link both as a must-fill field and as a
     # "is this the correct link" question. Drop the question.
     stats["dhl_link_q"] = remove_open_questions(
