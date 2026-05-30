@@ -457,6 +457,160 @@ def remove_sections_by_label(soup: BeautifulSoup, labels: list[str]) -> int:
     return removed
 
 
+def _find_leaf_by_summary(soup: BeautifulSoup, substr: str) -> Tag | None:
+    """First ``<details>`` whose own summary text contains ``substr``."""
+    needle = substr.lower()
+    for d in soup.find_all("details"):
+        sm = d.find("summary", recursive=False)
+        if sm and needle in sm.get_text(" ", strip=True).lower():
+            return d
+    return None
+
+
+def _own_filter(d: Tag):
+    """Predicate: element belongs to ``d`` and not to a nested sub-section."""
+    nested = [n for n in d.find_all("details") if n is not d]
+    nid: set[int] = set()
+    for n in nested:
+        nid.add(id(n))
+        for c in n.descendants:
+            nid.add(id(c))
+    return lambda el: id(el) not in nid
+
+
+def _drop_table_if_empty(tbl: Tag | None) -> None:
+    """Remove a Q/A table (and its wrapper) once it has no answer cells left."""
+    if tbl is None:
+        return
+    if tbl.find(class_="editable-cell") is None and tbl.find(class_="review-cell") is None:
+        wrapper = tbl.parent
+        tbl.decompose()
+        # Notion wraps each table in <div class="indented"> / display:contents.
+        if (
+            wrapper is not None
+            and wrapper.name == "div"
+            and not wrapper.get_text(strip=True)
+            and wrapper.find("table") is None
+            and wrapper.find(["img", "figure"]) is None
+        ):
+            wrapper.decompose()
+
+
+def remove_open_questions(soup: BeautifulSoup, section_substr: str, needles: list[str]) -> int:
+    """Within the leaf section whose summary contains ``section_substr``,
+    delete the open-question rows (``<tr>`` holding a ``.textarea-cell`` and
+    NOT a review pair) whose prompt text matches any of ``needles``.
+
+    Used to strip questions that duplicate a required field elsewhere in the
+    same section (e.g. an "application form link" asked both as a must-fill
+    field and again as a free-text question)."""
+    sec = _find_leaf_by_summary(soup, section_substr)
+    if sec is None:
+        return 0
+    own = _own_filter(sec)
+    lowered = [n.lower() for n in needles]
+    removed = 0
+    for tr in list(sec.find_all("tr")):
+        if not own(tr):
+            continue
+        if tr.find(class_="textarea-cell") is None:
+            continue
+        if tr.find(class_="review-cell") is not None:
+            continue
+        first = tr.find("td")
+        text = first.get_text(" ", strip=True).lower() if first else ""
+        if any(n in text for n in lowered):
+            tbl = tr.find_parent("table")
+            tr.decompose()
+            removed += 1
+            _drop_table_if_empty(tbl)
+    return removed
+
+
+def remove_callouts(soup: BeautifulSoup, section_substr: str | None, text_needle: str) -> int:
+    """Delete ``<figure class="callout">`` boxes whose text contains
+    ``text_needle``. If ``section_substr`` is given, only look inside that
+    leaf section; otherwise search the whole document."""
+    scope = _find_leaf_by_summary(soup, section_substr) if section_substr else soup
+    if scope is None:
+        return 0
+    own = _own_filter(scope) if section_substr else (lambda el: True)
+    needle = text_needle.lower()
+    removed = 0
+    for fig in list(scope.find_all("figure", class_="callout")):
+        if not own(fig):
+            continue
+        if needle in fig.get_text(" ", strip=True).lower():
+            wrapper = fig.parent
+            fig.decompose()
+            if (
+                wrapper is not None
+                and wrapper.name == "div"
+                and not wrapper.get_text(strip=True)
+                and wrapper.find(["img", "figure", "table"]) is None
+            ):
+                wrapper.decompose()
+            removed += 1
+    return removed
+
+
+def dedup_workbook(soup: BeautifulSoup) -> dict:
+    """Editorial de-duplication pass requested by the embassy reviewer.
+    Each entry removes content that is asked twice or is pure boilerplate."""
+    stats: dict[str, int] = {}
+
+    # Item 2 — "application form link" asked both as a must-fill field AND
+    # as a free-text question. Keep the must-fill field, drop the question.
+    stats["app_link_qs"] = (
+        remove_open_questions(soup, "2.1 Birth", ["please provide the real application form link"])
+        + remove_open_questions(soup, "2.2 Marriage", ["please provide the real application form link"])
+        + remove_open_questions(soup, "2.3 Divorce", ["is there an application form link"])
+        + remove_open_questions(soup, "5.1 Tourist", ["real application form link"])
+        + remove_open_questions(soup, "5.3 Special", ["real application form link"])
+    )
+
+    # Item 3 — 2.3 asks attendance / courier both as must-fill rows and as a
+    # combined free-text question. Drop the question.
+    stats["attendance_q"] = remove_open_questions(
+        soup, "2.3 Divorce", ["is personal attendance required, or is courier possible"]
+    )
+
+    # Item 5 — 3.6 asks the service link both as a must-fill field and as a
+    # "is this the correct link" question. Drop the question.
+    stats["dhl_link_q"] = remove_open_questions(
+        soup, "3.6 DHL", ["is fasttracklb.dhl.com the correct official link"]
+    )
+
+    # Item 7 — 9.1 working-hours question duplicates the §1.1 "Working hours"
+    # must-fill field. (Appointment questions are kept — they're distinct and
+    # not asked anywhere else.)
+    stats["working_hours_q"] = remove_open_questions(
+        soup, "9.1 Operations", ["official working hours"]
+    )
+
+    # Item 4 — 3.1 C/D/E/F each repeat their first question inside a yellow
+    # "❓ Open question" callout that can't be answered in. The same prompt
+    # already lives in the answerable list below, so drop the callout.
+    stats["passport_callouts"] = sum(
+        remove_callouts(soup, leaf, "open question")
+        for leaf in (
+            "C) First-time issuance — newborn",
+            "D) Renewal of an expired",
+            "E) Replacement of a lost",
+            "F) Replacement of a damaged",
+        )
+    )
+
+    # Item 6 — the yellow box at the end of §8 just describes what 8.2–8.6
+    # cover; it's boilerplate. Remove it (keep the "📌 General information"
+    # reference box).
+    stats["section8_box"] = remove_callouts(
+        soup, None, "Embassy to confirm / complete for sections 8.2"
+    )
+
+    return stats
+
+
 def add_section_counters(soup: BeautifulSoup) -> int:
     """Append a placeholder counter pill (``<span class="section-counter">``)
     to every ``<details>``'s summary so the reviewer can see "answered /
@@ -785,8 +939,16 @@ def transform(soup: BeautifulSoup) -> dict:
     # one section at a time.
     stats["toc_removed"] = remove_table_of_contents(soup)
     stats["intro_steps"] = rewrite_intro_steps(soup)
+    # Editorial de-duplication (remove questions asked twice + boilerplate).
+    stats["dedup"] = dedup_workbook(soup)
     stats["sections_removed"] = remove_sections_by_label(
-        soup, ["9.6 Language & accessibility"]
+        soup,
+        [
+            "9.6 Language & accessibility",
+            "department emails",                 # §1.2 — emails kept per-section
+            "9.3 Processing times",              # consolidated dup of per-section Qs
+            "10. Summary of dummy links",        # links already asked throughout
+        ],
     )
     # Counter pills must be added AFTER pruning so we don't emit counters
     # on sections we're about to delete.
@@ -2309,11 +2471,15 @@ PORTAL_JS = r"""
     let customCounter = 0;
 
     function getMainSectionCount() {
-        // The workbook's top-level chapter count. We used to read this
-        // off the TOC, but that callout was removed at build time. Use
-        // the hardcoded count of the embassy workbook instead — the
-        // build script can update this if chapters are added/removed.
-        return 10;
+        // The workbook's top-level chapter count, computed live so it stays
+        // correct when sections are added/removed at build time. Counts the
+        // top-level <details> (no <details> ancestor) that aren't custom
+        // sections the reviewer added themselves.
+        return Array.from(document.querySelectorAll('details')).filter(d => {
+            if (d.closest('#custom-sections-area')) return false;
+            const p = d.parentElement;
+            return !(p && p.closest('details'));
+        }).length;
     }
 
     function renumberCustomSections() {
