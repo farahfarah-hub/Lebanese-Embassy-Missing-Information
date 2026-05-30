@@ -575,6 +575,13 @@ def dedup_workbook(soup: BeautifulSoup) -> dict:
         soup, "2.3 Divorce", ["is personal attendance required, or is courier possible"]
     )
 
+    # 2.1 already has "Required documents" as a Correct/Incorrect review row
+    # (with a correction box). Asking "Is the document list complete and
+    # correct?" again as an open question is pure duplication — drop it.
+    stats["doc_list_q"] = remove_open_questions(
+        soup, "2.1 Birth", ["is the document list complete and correct"]
+    )
+
     # Item 5 — 3.6 asks the service link both as a must-fill field and as a
     # "is this the correct link" question. Drop the question.
     stats["dhl_link_q"] = remove_open_questions(
