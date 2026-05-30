@@ -296,7 +296,11 @@ def convert_section_verdicts(soup: BeautifulSoup) -> int:
         # Find the enclosing leaf BEFORE we mutate anything, so we can
         # decide whether a verdict pill is actually needed here.
         leaf = wrapper.find_parent("details")
-        needs_verdict = leaf is not None and _leaf_has_review_pairs(leaf)
+        # Section verdict pills ("All correct" / "Needs edits") were removed —
+        # reviewers mark each row directly, so the section-level verdict was
+        # redundant noise. We always strip the prompt + to-do lists and just
+        # tag the leaf for progress tracking.
+        needs_verdict = False
 
         if needs_verdict:
             verdict_block, verdict_id = build_verdict_widget(section_label)
@@ -782,26 +786,10 @@ def inject_verdicts_into_remaining_leaves(soup: BeautifulSoup) -> int:
         summary = details.find("summary", recursive=False)
         section_label = summary.get_text(" ", strip=True) if summary else None
 
-        if _leaf_has_review_pairs(details):
-            verdict_block, verdict_id = build_verdict_widget(section_label)
-            indented = details.find("div", class_="indented", recursive=False)
-            if indented is not None:
-                indented.insert(0, verdict_block)
-            elif summary is not None:
-                summary.insert_after(verdict_block)
-            else:
-                details.insert(0, verdict_block)
-            details["data-section-id"] = verdict_id
-            details["data-verdict-name"] = verdict_id
-            if section_label:
-                details["data-section-label"] = section_label
-            injected += 1
-        else:
-            # Track this section (so progress counts its required fields)
-            # but don't bolt on a meaningless verdict.
-            details["data-section-id"] = next_field_id("section")
-            if section_label:
-                details["data-section-label"] = section_label
+        # Verdict pills removed — always track the section without one.
+        details["data-section-id"] = next_field_id("section")
+        if section_label:
+            details["data-section-label"] = section_label
     return injected
 
 
